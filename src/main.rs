@@ -5,7 +5,11 @@ use anyhow::Result;
 use clap::Parser;
 
 #[derive(Parser)]
-#[command(name = "auto-push", version, about = "Auto-stage, generate commit message with Claude, and push")]
+#[command(
+    name = "auto-push",
+    version,
+    about = "Auto-stage, generate commit message with Claude, and push"
+)]
 struct Cli {
     /// Stage all changes before committing
     #[arg(short = 'a', long, default_value_t = true)]

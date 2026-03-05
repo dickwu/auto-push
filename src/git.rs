@@ -42,8 +42,7 @@ pub enum PullResult {
 }
 
 pub fn ensure_git_repo() -> Result<()> {
-    run_git(&["rev-parse", "--git-dir"])
-        .context("not a git repository")?;
+    run_git(&["rev-parse", "--git-dir"]).context("not a git repository")?;
     Ok(())
 }
 
@@ -140,8 +139,4 @@ pub fn push() -> Result<String> {
 
 pub fn current_branch() -> Result<String> {
     run_git(&["rev-parse", "--abbrev-ref", "HEAD"])
-}
-
-pub fn repo_name() -> Result<String> {
-    run_cmd("gh", &["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"])
 }
