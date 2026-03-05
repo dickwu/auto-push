@@ -21,7 +21,8 @@ Rules:
 
 fn call_claude(prompt: &str, system: &str) -> Result<String> {
     let output = Command::new("claude")
-        .args(["-p", prompt, "--system", system])
+        .args(["-p", prompt, "--system-prompt", system])
+        .env_remove("CLAUDECODE")
         .output()
         .context("failed to run claude CLI — is it installed?")?;
 
