@@ -13,25 +13,25 @@ CLI tool that automates the git workflow: pull, stage, generate commit messages 
 ### macOS (Homebrew)
 
 ```bash
-brew install gwddeveloper/tap/auto-push
+brew install dickwu/tap/auto-push
 ```
 
 ### Linux / macOS (script)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/gwddeveloper/auto-push/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/dickwu/auto-push/main/install.sh | bash
 ```
 
 Or install to a custom directory:
 
 ```bash
-INSTALL_DIR=~/.local/bin curl -fsSL https://raw.githubusercontent.com/gwddeveloper/auto-push/main/install.sh | bash
+INSTALL_DIR=~/.local/bin curl -fsSL https://raw.githubusercontent.com/dickwu/auto-push/main/install.sh | bash
 ```
 
 ### From source
 
 ```bash
-cargo install --git https://github.com/gwddeveloper/auto-push
+cargo install --git https://github.com/dickwu/auto-push
 ```
 
 ## Usage

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO="gwddeveloper/auto-push"
+REPO="dickwu/auto-push"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 
 get_arch() {
