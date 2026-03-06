@@ -105,11 +105,12 @@ fn main() -> Result<()> {
 
     if !cli.no_push {
         let branch = git::current_branch()?;
-        println!("Pushing to origin/{branch}...");
+        let remote = git::default_remote().unwrap_or_else(|_| "origin".to_string());
+        println!("Pushing to {remote}/{branch}...");
         if let Err(push_err) = git::push() {
             eprintln!("Push failed: {push_err}");
             eprintln!("Asking Claude to diagnose and fix...");
-            let remote_url = git::remote_url("origin");
+            let remote_url = git::remote_url(&remote);
             let fix_commands = claude::fix_push_error(&branch, &remote_url, &push_err.to_string())?;
             if fix_commands.starts_with("UNRECOVERABLE:") {
                 bail!("{fix_commands}");

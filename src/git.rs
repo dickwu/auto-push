@@ -117,14 +117,8 @@ pub fn commit(message: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn remote_url(name: &str) -> String {
-    run_git(&["remote", "get-url", name]).unwrap_or_else(|_| name.to_string())
-}
-
-pub fn push() -> Result<String> {
-    let branch = current_branch()?;
-
-    // Check if any remote is configured
+/// Returns the first configured remote name, preferring "origin" if present.
+pub fn default_remote() -> Result<String> {
     let remotes = run_git(&["remote"])?;
     if remotes.is_empty() {
         bail!(
@@ -132,8 +126,20 @@ pub fn push() -> Result<String> {
              Add one with: git remote add origin <url>"
         );
     }
+    let preferred = remotes.lines().find(|r| *r == "origin");
+    Ok(preferred
+        .unwrap_or_else(|| remotes.lines().next().unwrap())
+        .to_string())
+}
 
-    run_git(&["push", "-u", "origin", &branch])
+pub fn remote_url(name: &str) -> String {
+    run_git(&["remote", "get-url", name]).unwrap_or_else(|_| name.to_string())
+}
+
+pub fn push() -> Result<String> {
+    let branch = current_branch()?;
+    let remote = default_remote()?;
+    run_git(&["push", "-u", &remote, &branch])
 }
 
 pub fn run_commands(commands: &str) -> Result<()> {
