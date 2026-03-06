@@ -9,32 +9,40 @@ use clap::Parser;
 #[command(
     name = "auto-push",
     version,
-    about = "Auto-stage, generate commit message with Claude, and push"
+    about = "Automate your git workflow: pull, stage, generate AI commit messages, and push — all in one command",
+    long_about = "auto-push streamlines your entire git workflow into a single command.\n\n\
+        It pulls the latest changes, stages your work, uses the local Claude CLI to \
+        analyze your diff and generate meaningful commit messages, then pushes to the remote.\n\n\
+        Supports hunk-level commit splitting — Claude can intelligently group related \
+        changes into separate, well-described commits.\n\n\
+        Requires: git, gh (GitHub CLI), claude (Claude Code CLI, authenticated)"
 )]
 struct Cli {
-    /// Stage all changes before committing
+    /// Stage all changes before committing (enabled by default)
     #[arg(short = 'a', long, default_value_t = true)]
     stage_all: bool,
 
-    /// Skip pushing to remote
+    /// Skip pushing to remote after committing
     #[arg(long)]
     no_push: bool,
 
-    /// Show the generated message and ask for confirmation before committing
+    /// Review the generated commit message(s) and confirm before committing
     #[arg(short = 'c', long)]
     confirm: bool,
 
-    /// Dry run: show what would happen without making changes
+    /// Preview what would happen without making any changes
     #[arg(short = 'n', long)]
     dry_run: bool,
 
-    /// Override the generated commit message
+    /// Use a custom commit message instead of generating one with Claude
     #[arg(short = 'm', long)]
     message: Option<String>,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    println!("auto-push v{}", env!("CARGO_PKG_VERSION"));
 
     git::ensure_git_repo()?;
 
