@@ -1,7 +1,8 @@
 mod claude;
+mod diff;
 mod git;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use clap::Parser;
 
 #[derive(Parser)]
@@ -95,21 +96,35 @@ fn main() -> Result<()> {
     } else {
         // Let Claude analyze and split into logical commits
         println!("\nAnalyzing changes with Claude...");
-        let files = git::changed_file_list()?;
-        let diff = git::diff_for_commit()?;
+        let raw_diff = git::diff_for_commit()?;
+        let hunks = diff::parse_diff(&raw_diff);
+
+        if hunks.is_empty() {
+            bail!("no diff hunks found to commit");
+        }
 
         let commit_groups = if needs_merge {
             // For merges, use single commit with detailed message
-            let message = claude::generate_commit_message(&diff, true)?;
-            vec![claude::CommitGroup { message, files }]
+            let message = claude::generate_commit_message(&raw_diff, true)?;
+            let all_ids: Vec<usize> = hunks.iter().map(|h| h.id).collect();
+            vec![claude::CommitGroup {
+                message,
+                hunks: all_ids,
+            }]
         } else {
-            claude::plan_commits(&files, &diff)?
+            let formatted = diff::format_hunks_for_prompt(&hunks);
+            let valid_ids: Vec<usize> = hunks.iter().map(|h| h.id).collect();
+            claude::plan_commits(&formatted, &valid_ids)?
         };
+
+        // Deduplicate: each hunk ID only appears in its first commit group
+        let commit_groups = dedup_commit_groups(commit_groups);
 
         let total = commit_groups.len();
         println!("\nClaude planned {total} commit(s):\n");
         for (i, group) in commit_groups.iter().enumerate() {
-            println!("  {}. {} ({})", i + 1, group.message, group.files.join(", "));
+            let files = resolve_files(&hunks, &group.hunks);
+            println!("  {}. {} ({})", i + 1, group.message, files.join(", "));
         }
         println!();
 
@@ -121,17 +136,7 @@ fn main() -> Result<()> {
         if cli.dry_run {
             println!("[dry-run] Would create {total} commit(s) as shown above");
         } else {
-            for (i, group) in commit_groups.iter().enumerate() {
-                // Unstage everything, then stage only this group's files
-                if total > 1 {
-                    git::unstage_all()?;
-                    git::stage_files(&group.files)?;
-                }
-                // If single commit, everything is already staged
-
-                git::commit(&group.message)?;
-                println!("  [{}/{}] Committed: {}", i + 1, total, group.message);
-            }
+            commit_groups_with_hunks(&commit_groups, &hunks, total)?;
         }
     }
 
@@ -156,6 +161,93 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Execute commit groups using hunk-level staging via `git apply --cached`.
+/// Falls back to file-level staging if patch application fails.
+fn commit_groups_with_hunks(
+    groups: &[claude::CommitGroup],
+    all_hunks: &[diff::DiffHunk],
+    total: usize,
+) -> Result<()> {
+    for (i, group) in groups.iter().enumerate() {
+        let group_hunks: Vec<&diff::DiffHunk> = group
+            .hunks
+            .iter()
+            .filter_map(|id| all_hunks.iter().find(|h| h.id == *id))
+            .collect();
+
+        if total > 1 {
+            git::unstage_all()?;
+
+            // Separate patchable hunks from file-level entries (binary, rename-only)
+            let patchable: Vec<&diff::DiffHunk> = group_hunks
+                .iter()
+                .filter(|h| h.is_patchable())
+                .copied()
+                .collect();
+            let file_level: Vec<&diff::DiffHunk> = group_hunks
+                .iter()
+                .filter(|h| !h.is_patchable())
+                .copied()
+                .collect();
+
+            // Stage patchable hunks via git apply
+            if !patchable.is_empty() {
+                let patch = diff::hunks_to_patch(&patchable);
+                if let Err(e) = git::apply_patch_to_index(&patch) {
+                    eprintln!(
+                        "  Warning: hunk-level staging failed ({e}), falling back to file-level"
+                    );
+                    let files = diff::files_from_hunks(patchable.into_iter());
+                    git::stage_files(&files)?;
+                }
+            }
+
+            // Stage file-level entries via git add
+            if !file_level.is_empty() {
+                let files = diff::files_from_hunks(file_level.into_iter());
+                git::stage_files(&files)?;
+            }
+        }
+        // If single commit, everything is already staged
+
+        git::commit(&group.message)?;
+        println!("  [{}/{}] Committed: {}", i + 1, total, group.message);
+    }
+    Ok(())
+}
+
+/// Ensure each hunk ID appears in only one commit group (the first one that claims it).
+/// Drops any groups that end up with no hunks after dedup.
+fn dedup_commit_groups(groups: Vec<claude::CommitGroup>) -> Vec<claude::CommitGroup> {
+    let mut seen = std::collections::HashSet::new();
+    groups
+        .into_iter()
+        .filter_map(|group| {
+            let unique_hunks: Vec<usize> = group
+                .hunks
+                .into_iter()
+                .filter(|id| seen.insert(*id))
+                .collect();
+            if unique_hunks.is_empty() {
+                None
+            } else {
+                Some(claude::CommitGroup {
+                    message: group.message,
+                    hunks: unique_hunks,
+                })
+            }
+        })
+        .collect()
+}
+
+/// Resolve hunk IDs to their unique file paths for display.
+fn resolve_files(all_hunks: &[diff::DiffHunk], hunk_ids: &[usize]) -> Vec<String> {
+    let matched = hunk_ids
+        .iter()
+        .filter_map(|id| all_hunks.iter().find(|h| h.id == *id));
+    diff::files_from_hunks(matched)
 }
 
 fn print_status() -> Result<()> {

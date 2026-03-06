@@ -1,7 +1,6 @@
 use anyhow::{Context, Result, bail};
 use std::process::Command;
 
-
 pub struct GitStatus {
     pub staged: String,
     pub unstaged: String,
@@ -127,22 +126,33 @@ pub fn stage_files(files: &[String]) -> Result<()> {
     Ok(())
 }
 
-pub fn changed_file_list() -> Result<Vec<String>> {
-    let staged = run_git(&["diff", "--cached", "--name-only"])?;
-    let unstaged = run_git(&["diff", "--name-only"])?;
-    let untracked = run_git(&["ls-files", "--others", "--exclude-standard"])?;
+/// Apply a patch to the index only (staged area) without modifying the working tree.
+/// Uses --3way for automatic fallback when context lines don't match exactly.
+pub fn apply_patch_to_index(patch: &str) -> Result<()> {
+    use std::io::Write;
+    use std::process::Stdio;
 
-    let mut files: Vec<String> = staged
-        .lines()
-        .chain(unstaged.lines())
-        .chain(untracked.lines())
-        .filter(|l| !l.is_empty())
-        .map(String::from)
-        .collect();
+    let mut child = Command::new("git")
+        .args(["apply", "--cached", "--3way"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("failed to spawn git apply")?;
 
-    files.sort();
-    files.dedup();
-    Ok(files)
+    child
+        .stdin
+        .take()
+        .expect("stdin was piped")
+        .write_all(patch.as_bytes())?;
+
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("git apply --cached failed: {}", stderr.trim());
+    }
+
+    Ok(())
 }
 
 pub fn commit(message: &str) -> Result<()> {
