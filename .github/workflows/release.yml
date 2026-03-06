@@ -82,3 +82,80 @@ jobs:
           files: |
             artifacts/*.tar.gz
             artifacts/*.sha256
+
+  update-homebrew:
+    needs: release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout homebrew tap
+        uses: actions/checkout@v4
+        with:
+          repository: dickwu/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Update formula
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          SHA_AARCH64_DARWIN=$(cut -d ' ' -f1 artifacts/auto-push-aarch64-apple-darwin.tar.gz.sha256)
+          SHA_X86_64_DARWIN=$(cut -d ' ' -f1 artifacts/auto-push-x86_64-apple-darwin.tar.gz.sha256)
+          SHA_AARCH64_LINUX=$(cut -d ' ' -f1 artifacts/auto-push-aarch64-unknown-linux-gnu.tar.gz.sha256)
+          SHA_X86_64_LINUX=$(cut -d ' ' -f1 artifacts/auto-push-x86_64-unknown-linux-gnu.tar.gz.sha256)
+
+          cat > Formula/auto-push.rb << EOF
+          class AutoPush < Formula
+            desc "CLI tool that automates git workflow with AI-generated commit messages"
+            homepage "https://github.com/dickwu/auto-push"
+            version "${VERSION}"
+            license "MIT"
+
+            on_macos do
+              on_arm do
+                url "https://github.com/dickwu/auto-push/releases/download/v#{version}/auto-push-aarch64-apple-darwin.tar.gz"
+                sha256 "${SHA_AARCH64_DARWIN}"
+              end
+
+              on_intel do
+                url "https://github.com/dickwu/auto-push/releases/download/v#{version}/auto-push-x86_64-apple-darwin.tar.gz"
+                sha256 "${SHA_X86_64_DARWIN}"
+              end
+            end
+
+            on_linux do
+              on_arm do
+                url "https://github.com/dickwu/auto-push/releases/download/v#{version}/auto-push-aarch64-unknown-linux-gnu.tar.gz"
+                sha256 "${SHA_AARCH64_LINUX}"
+              end
+
+              on_intel do
+                url "https://github.com/dickwu/auto-push/releases/download/v#{version}/auto-push-x86_64-unknown-linux-gnu.tar.gz"
+                sha256 "${SHA_X86_64_LINUX}"
+              end
+            end
+
+            def install
+              bin.install "auto-push"
+            end
+
+            test do
+              assert_match version.to_s, shell_output("#{bin}/auto-push --version")
+            end
+          end
+          EOF
+
+          sed -i 's/^          //' Formula/auto-push.rb
+
+      - name: Commit and push
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/auto-push.rb
+          git commit -m "chore: bump auto-push to v${VERSION}"
+          git push
