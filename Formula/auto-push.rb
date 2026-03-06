@@ -7,24 +7,24 @@ class AutoPush < Formula
   on_macos do
     on_arm do
       url "https://github.com/dickwu/auto-push/releases/download/v#{version}/auto-push-aarch64-apple-darwin.tar.gz"
-      sha256 "75985f39baebe07c953571d34e2e2a319d0cb99f24422f4a04aaf35302e70bf8"
+      sha256 "572ae011ddd3ceebe2f5d826a51ef6253e5bc4828e3b322916019f8419d67ffd"
     end
 
     on_intel do
       url "https://github.com/dickwu/auto-push/releases/download/v#{version}/auto-push-x86_64-apple-darwin.tar.gz"
-      sha256 "81adb298a18757c20ce11f68566222aa2ee434f3876ec12a016e08edb2e312f7"
+      sha256 "f969851538dafcaa4102bf40e4c5520425e524f5a7db107dfbaeacd7b7871b72"
     end
   end
 
   on_linux do
     on_arm do
       url "https://github.com/dickwu/auto-push/releases/download/v#{version}/auto-push-aarch64-unknown-linux-gnu.tar.gz"
-      sha256 "46cccaec2e57bd5962b413e787d7e9acee039520ac072d122dd70d0d3120d967"
+      sha256 "1b96c713e4b7a87160294ec0b416967128d855a0d94bbf1fbe750b1b27c09a2f"
     end
 
     on_intel do
       url "https://github.com/dickwu/auto-push/releases/download/v#{version}/auto-push-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "9e4df5a1b6d5cd60afee5d87cae4a94fe507496a60ca9184bb88bad6fcaa2035"
+      sha256 "7f6e339e6f14174c7b07699b38650ce6e6648a98a9ef8adc75ac2a7e51a06241"
     end
   end
 
