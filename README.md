@@ -5,7 +5,6 @@ CLI tool that automates the git workflow: pull, stage, generate commit messages 
 ## Prerequisites
 
 - [git](https://git-scm.com)
-- [gh](https://cli.github.com) (GitHub CLI)
 - [claude](https://claude.ai/code) (Claude Code CLI, must be authenticated)
 
 ## Install
@@ -13,7 +12,14 @@ CLI tool that automates the git workflow: pull, stage, generate commit messages 
 ### macOS (Homebrew)
 
 ```bash
-brew install dickwu/tap/auto-push
+brew tap dickwu/auto-push https://github.com/dickwu/auto-push
+brew install auto-push
+```
+
+### Upgrade
+
+```bash
+brew update && brew upgrade auto-push
 ```
 
 ### Linux / macOS (script)
@@ -60,7 +66,7 @@ auto-push -m "feat: add user auth"
 3. `git add -A` to stage everything
 4. Get the diff and send it to Claude CLI for commit message generation
 5. `git commit` with the generated message
-6. Push via `gh` / `git push`
+6. `git push` — if it fails, Claude diagnoses the error and runs the fix automatically
 
 If the pull required a merge, Claude uses a more detailed prompt to describe the merge context. For clean pulls, it uses a simple single-line format.
 

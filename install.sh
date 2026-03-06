@@ -62,8 +62,7 @@ main() {
     echo "Installed auto-push to ${INSTALL_DIR}/auto-push"
     echo ""
     echo "Prerequisites:"
-    echo "  - git:   https://git-scm.com"
-    echo "  - gh:    https://cli.github.com"
+    echo "  - git:    https://git-scm.com"
     echo "  - claude: https://claude.ai/code"
 }
 
