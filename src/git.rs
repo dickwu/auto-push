@@ -25,6 +25,7 @@ pub enum PullResult {
     AlreadyUpToDate,
     FastForward,
     Merged,
+    Conflict,
 }
 
 pub fn ensure_git_repo() -> Result<()> {
@@ -40,12 +41,14 @@ pub fn pull() -> Result<PullResult> {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{stdout}{stderr}");
 
     if !output.status.success() {
+        if combined.contains("CONFLICT") || combined.contains("Merge conflict") {
+            return Ok(PullResult::Conflict);
+        }
         bail!("git pull failed: {}", stderr.trim());
     }
-
-    let combined = format!("{stdout}{stderr}");
 
     if combined.contains("Already up to date") {
         Ok(PullResult::AlreadyUpToDate)
@@ -205,4 +208,23 @@ pub fn run_commands(commands: &str) -> Result<()> {
 
 pub fn current_branch() -> Result<String> {
     run_git(&["rev-parse", "--abbrev-ref", "HEAD"])
+}
+
+pub fn conflict_files() -> Result<Vec<String>> {
+    let output = run_git(&["diff", "--name-only", "--diff-filter=U"])?;
+    Ok(output
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect())
+}
+
+pub fn has_conflicts() -> Result<bool> {
+    let files = conflict_files()?;
+    Ok(!files.is_empty())
+}
+
+pub fn abort_merge() -> Result<()> {
+    run_git(&["merge", "--abort"])?;
+    Ok(())
 }

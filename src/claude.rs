@@ -72,6 +72,54 @@ fn call_claude(prompt: &str, system: &str) -> Result<String> {
     Ok(message)
 }
 
+const CONFLICT_RESOLVE_PROMPT: &str = r#"You are a git merge conflict resolver. The following files have merge conflicts (marked with <<<<<<<, =======, >>>>>>>).
+
+Your task:
+1. Read each conflicted file
+2. Understand both sides of each conflict
+3. Resolve each conflict by keeping the correct combination of changes
+4. Write the resolved content back to each file (remove ALL conflict markers)
+5. After resolving, run: git add <file> for each resolved file
+
+Rules:
+- Preserve ALL intentional changes from both sides when possible
+- If changes are incompatible, prefer the incoming (remote) changes but keep local additions that don't conflict
+- Remove ALL conflict markers (<<<<<<< ======= >>>>>>>) from every file
+- Do NOT leave any conflict markers in any file
+- After editing each file, stage it with git add"#;
+
+pub fn resolve_conflicts(conflict_files: &[String], force: bool) -> Result<()> {
+    let file_list = conflict_files.join(", ");
+    let prompt = format!(
+        "These files have merge conflicts that need resolving: {file_list}\n\n\
+         Please read each file, resolve all merge conflicts, write the fixed content back, \
+         and stage each file with `git add`."
+    );
+
+    let mut args = vec!["-p", &prompt, "--system-prompt", CONFLICT_RESOLVE_PROMPT];
+    if force {
+        args.push("--dangerously-skip-permissions");
+    } else {
+        args.push("--allowedTools");
+        args.push("Edit,Read,Bash");
+    }
+
+    let status = Command::new("claude")
+        .args(&args)
+        .env_remove("CLAUDECODE")
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .status()
+        .context("failed to run claude CLI for conflict resolution")?;
+
+    if !status.success() {
+        bail!("claude conflict resolution failed");
+    }
+
+    Ok(())
+}
+
 fn truncate_diff(diff: &str) -> String {
     let max_len = 20_000;
     if diff.len() > max_len {

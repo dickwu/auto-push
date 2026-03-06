@@ -37,6 +37,10 @@ struct Cli {
     /// Use a custom commit message instead of generating one with Claude
     #[arg(short = 'm', long)]
     message: Option<String>,
+
+    /// Use Claude with --dangerously-skip-permissions to auto-resolve merge conflicts
+    #[arg(short = 'f', long)]
+    force: bool,
 }
 
 fn main() -> Result<()> {
@@ -60,6 +64,40 @@ fn main() -> Result<()> {
         }
         Ok(git::PullResult::Merged) => {
             println!("Merged remote changes.");
+            true
+        }
+        Ok(git::PullResult::Conflict) => {
+            println!("Merge conflicts detected!");
+            let conflict_files = git::conflict_files()?;
+            if conflict_files.is_empty() {
+                bail!("git reported conflicts but no conflicted files found");
+            }
+            println!(
+                "Conflicted files ({}):\n{}",
+                conflict_files.len(),
+                conflict_files
+                    .iter()
+                    .map(|f| format!("  - {f}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
+
+            if !cli.force {
+                println!("\nLaunching Claude to resolve conflicts (interactive)...");
+                println!("Tip: use --force (-f) to auto-resolve without prompts");
+            } else {
+                println!("\nLaunching Claude to auto-resolve conflicts (--force mode)...");
+            }
+
+            claude::resolve_conflicts(&conflict_files, cli.force)?;
+
+            if git::has_conflicts()? {
+                eprintln!("Conflicts remain after Claude resolution. Aborting merge.");
+                git::abort_merge()?;
+                bail!("unresolved merge conflicts — please resolve manually");
+            }
+
+            println!("All conflicts resolved by Claude.");
             true
         }
         Err(e) => {
