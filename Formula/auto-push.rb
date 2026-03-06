@@ -1,7 +1,7 @@
 class AutoPush < Formula
   desc "CLI tool that automates git workflow with AI-generated commit messages"
   homepage "https://github.com/dickwu/auto-push"
-  version "0.1.5"
+  version "0.1.6"
   license "MIT"
 
   on_macos do
