@@ -112,6 +112,39 @@ pub fn stage_all() -> Result<()> {
     Ok(())
 }
 
+pub fn unstage_all() -> Result<()> {
+    run_git(&["reset", "HEAD"])?;
+    Ok(())
+}
+
+pub fn stage_files(files: &[String]) -> Result<()> {
+    if files.is_empty() {
+        return Ok(());
+    }
+    let mut args: Vec<&str> = vec!["add", "--"];
+    args.extend(files.iter().map(|f| f.as_str()));
+    run_git(&args)?;
+    Ok(())
+}
+
+pub fn changed_file_list() -> Result<Vec<String>> {
+    let staged = run_git(&["diff", "--cached", "--name-only"])?;
+    let unstaged = run_git(&["diff", "--name-only"])?;
+    let untracked = run_git(&["ls-files", "--others", "--exclude-standard"])?;
+
+    let mut files: Vec<String> = staged
+        .lines()
+        .chain(unstaged.lines())
+        .chain(untracked.lines())
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect();
+
+    files.sort();
+    files.dedup();
+    Ok(files)
+}
+
 pub fn commit(message: &str) -> Result<()> {
     run_git(&["commit", "-m", message])?;
     Ok(())

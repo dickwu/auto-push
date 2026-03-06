@@ -1,5 +1,26 @@
 use anyhow::{Context, Result, bail};
+use serde::Deserialize;
 use std::process::Command;
+
+#[derive(Debug, Deserialize)]
+pub struct CommitGroup {
+    pub message: String,
+    pub files: Vec<String>,
+}
+
+const PLAN_COMMITS_SYSTEM_PROMPT: &str = r#"You are a git commit planner. Given a list of changed files and a unified diff, decide how to group them into logical commits.
+
+Rules:
+- Group related changes together (e.g. a feature + its tests, a refactor across related files)
+- Unrelated changes MUST be in separate commits (e.g. a bug fix and a new feature)
+- Use conventional commit format for messages: <type>: <description>
+- Types: feat, fix, refactor, docs, test, chore, perf, ci
+- Keep each commit message under 72 characters
+- If ALL changes are related, use a single commit group
+- Output ONLY valid JSON, no markdown fences, no explanation
+
+Output format (JSON array):
+[{"message":"<commit message>","files":["path/to/file1","path/to/file2"]},{"message":"<commit message>","files":["path/to/file3"]}]"#;
 
 const PUSH_FIX_SYSTEM_PROMPT: &str = r#"You are a git expert assistant. The user's `git push` failed.
 Output ONLY shell commands to fix and complete the push. Each line must be a single executable shell command.
@@ -117,4 +138,44 @@ pub fn generate_commit_message(diff: &str, needs_merge: bool) -> Result<String> 
     };
 
     call_claude(&prompt, system)
+}
+
+pub fn plan_commits(files: &[String], diff: &str) -> Result<Vec<CommitGroup>> {
+    let truncated = truncate_diff(diff);
+    let file_list = files.join("\n");
+
+    let prompt = format!(
+        "Changed files:\n{file_list}\n\nDiff:\n```diff\n{truncated}\n```\n\nGroup these into logical commits. Output JSON only."
+    );
+
+    let raw = call_claude(&prompt, PLAN_COMMITS_SYSTEM_PROMPT)?;
+
+    // Strip markdown fences if Claude wraps the JSON
+    let json_str = raw
+        .trim()
+        .strip_prefix("```json")
+        .or_else(|| raw.trim().strip_prefix("```"))
+        .unwrap_or(raw.trim());
+    let json_str = json_str.strip_suffix("```").unwrap_or(json_str).trim();
+
+    let groups: Vec<CommitGroup> = serde_json::from_str(json_str)
+        .with_context(|| format!("failed to parse Claude's commit plan as JSON:\n{raw}"))?;
+
+    if groups.is_empty() {
+        bail!("Claude returned an empty commit plan");
+    }
+
+    // Validate that all files in the plan exist in the changed files list
+    for group in &groups {
+        if group.files.is_empty() {
+            bail!("Claude returned a commit group with no files: {}", group.message);
+        }
+        for file in &group.files {
+            if !files.contains(file) {
+                bail!("Claude referenced unknown file in commit plan: {file}");
+            }
+        }
+    }
+
+    Ok(groups)
 }

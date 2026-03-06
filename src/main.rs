@@ -67,6 +67,7 @@ fn main() -> Result<()> {
 
     print_status()?;
 
+    // Stage everything first so we can get a full picture of changes
     if cli.stage_all {
         if cli.dry_run {
             println!("\n[dry-run] Would stage all changes");
@@ -76,32 +77,63 @@ fn main() -> Result<()> {
         }
     }
 
-    let commit_message = match cli.message {
-        Some(msg) => msg,
-        None => {
-            println!("\nGenerating commit message with Claude...");
-            let diff = git::diff_for_commit()?;
-            claude::generate_commit_message(&diff, needs_merge)?
+    if let Some(msg) = cli.message {
+        // Manual message: single commit, everything staged
+        println!("\nCommit message:\n---\n{msg}\n---");
+
+        if cli.confirm && !prompt_confirm("Proceed with commit?")? {
+            println!("Aborted.");
+            return Ok(());
         }
-    };
 
-    println!("\nCommit message:\n---\n{commit_message}\n---");
-
-    if cli.confirm && !prompt_confirm("Proceed with commit?")? {
-        println!("Aborted.");
-        return Ok(());
-    }
-
-    if cli.dry_run {
-        println!("[dry-run] Would commit with the message above");
-        if !cli.no_push {
-            println!("[dry-run] Would push to remote");
+        if cli.dry_run {
+            println!("[dry-run] Would commit with the message above");
+        } else {
+            git::commit(&msg)?;
+            println!("Committed.");
         }
-        return Ok(());
-    }
+    } else {
+        // Let Claude analyze and split into logical commits
+        println!("\nAnalyzing changes with Claude...");
+        let files = git::changed_file_list()?;
+        let diff = git::diff_for_commit()?;
 
-    git::commit(&commit_message)?;
-    println!("Committed.");
+        let commit_groups = if needs_merge {
+            // For merges, use single commit with detailed message
+            let message = claude::generate_commit_message(&diff, true)?;
+            vec![claude::CommitGroup { message, files }]
+        } else {
+            claude::plan_commits(&files, &diff)?
+        };
+
+        let total = commit_groups.len();
+        println!("\nClaude planned {total} commit(s):\n");
+        for (i, group) in commit_groups.iter().enumerate() {
+            println!("  {}. {} ({})", i + 1, group.message, group.files.join(", "));
+        }
+        println!();
+
+        if cli.confirm && !prompt_confirm("Proceed with these commits?")? {
+            println!("Aborted.");
+            return Ok(());
+        }
+
+        if cli.dry_run {
+            println!("[dry-run] Would create {total} commit(s) as shown above");
+        } else {
+            for (i, group) in commit_groups.iter().enumerate() {
+                // Unstage everything, then stage only this group's files
+                if total > 1 {
+                    git::unstage_all()?;
+                    git::stage_files(&group.files)?;
+                }
+                // If single commit, everything is already staged
+
+                git::commit(&group.message)?;
+                println!("  [{}/{}] Committed: {}", i + 1, total, group.message);
+            }
+        }
+    }
 
     if !cli.no_push {
         let branch = git::current_branch()?;
