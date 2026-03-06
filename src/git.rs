@@ -1,19 +1,6 @@
 use anyhow::{Context, Result, bail};
 use std::process::Command;
 
-fn run_cmd(cmd: &str, args: &[&str]) -> Result<String> {
-    let output = Command::new(cmd)
-        .args(args)
-        .output()
-        .with_context(|| format!("failed to run: {cmd} {}", args.join(" ")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("{cmd} {} failed: {}", args.join(" "), stderr.trim());
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
 
 pub struct GitStatus {
     pub staged: String,
@@ -130,11 +117,41 @@ pub fn commit(message: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn remote_url(name: &str) -> String {
+    run_git(&["remote", "get-url", name]).unwrap_or_else(|_| name.to_string())
+}
+
 pub fn push() -> Result<String> {
     let branch = current_branch()?;
-    run_cmd("gh", &["repo", "sync", "--source", &branch])
-        .or_else(|_| run_git(&["push", "-u", "origin", &branch]))
-        .or_else(|_| run_git(&["push", "--set-upstream", "origin", &branch]))
+
+    // Check if any remote is configured
+    let remotes = run_git(&["remote"])?;
+    if remotes.is_empty() {
+        bail!(
+            "no git remote configured.\n\
+             Add one with: git remote add origin <url>"
+        );
+    }
+
+    run_git(&["push", "-u", "origin", &branch])
+}
+
+pub fn run_commands(commands: &str) -> Result<()> {
+    for line in commands.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        println!("  $ {line}");
+        let status = Command::new("sh")
+            .args(["-c", line])
+            .status()
+            .with_context(|| format!("failed to run: {line}"))?;
+        if !status.success() {
+            bail!("command failed: {line}");
+        }
+    }
+    Ok(())
 }
 
 pub fn current_branch() -> Result<String> {

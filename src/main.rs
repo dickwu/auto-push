@@ -1,7 +1,7 @@
 mod claude;
 mod git;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::Parser;
 
 #[derive(Parser)]
@@ -106,8 +106,20 @@ fn main() -> Result<()> {
     if !cli.no_push {
         let branch = git::current_branch()?;
         println!("Pushing to origin/{branch}...");
-        git::push()?;
-        println!("Pushed.");
+        if let Err(push_err) = git::push() {
+            eprintln!("Push failed: {push_err}");
+            eprintln!("Asking Claude to diagnose and fix...");
+            let remote_url = git::remote_url("origin");
+            let fix_commands = claude::fix_push_error(&branch, &remote_url, &push_err.to_string())?;
+            if fix_commands.starts_with("UNRECOVERABLE:") {
+                bail!("{fix_commands}");
+            }
+            println!("Claude suggests:\n{fix_commands}\n");
+            git::run_commands(&fix_commands)?;
+            println!("Pushed (via Claude fix).");
+        } else {
+            println!("Pushed.");
+        }
     }
 
     Ok(())

@@ -1,6 +1,15 @@
 use anyhow::{Context, Result, bail};
 use std::process::Command;
 
+const PUSH_FIX_SYSTEM_PROMPT: &str = r#"You are a git expert assistant. The user's `git push` failed.
+Analyze the error and output ONLY a shell command (or a short sequence of shell commands separated by newlines) that will fix and complete the push.
+Rules:
+- Output ONLY runnable shell commands, no explanations, no markdown fences
+- Use only standard git commands (no gh, no hub)
+- Do not force-push unless the error clearly requires it
+- If the error is unrecoverable (e.g. no network, no credentials), output: echo "UNRECOVERABLE: <reason>"
+- Keep the response under 5 lines"#;
+
 const SIMPLE_SYSTEM_PROMPT: &str = r#"You are a git commit message generator. Given a git diff, generate a concise, conventional commit message.
 
 Rules:
@@ -51,6 +60,13 @@ fn truncate_diff(diff: &str) -> String {
     } else {
         diff.to_string()
     }
+}
+
+pub fn fix_push_error(branch: &str, remote_url: &str, error: &str) -> Result<String> {
+    let prompt = format!(
+        "git push failed for branch `{branch}` on remote `{remote_url}`.\n\nError:\n{error}\n\nOutput the shell commands to fix and complete the push."
+    );
+    call_claude(&prompt, PUSH_FIX_SYSTEM_PROMPT)
 }
 
 pub fn generate_commit_message(diff: &str, needs_merge: bool) -> Result<String> {
