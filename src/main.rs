@@ -1,5 +1,6 @@
 mod claude;
 mod context;
+mod preflight;
 mod diff;
 mod git;
 
