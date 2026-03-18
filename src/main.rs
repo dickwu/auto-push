@@ -5,6 +5,7 @@ mod stash;
 mod pull;
 mod diff;
 mod git;
+mod stage_commit;
 
 use anyhow::{Result, bail};
 use clap::Parser;
