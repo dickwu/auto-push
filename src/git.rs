@@ -182,12 +182,6 @@ pub fn remote_url(name: &str) -> String {
     run_git(&["remote", "get-url", name]).unwrap_or_else(|_| name.to_string())
 }
 
-pub fn push() -> Result<String> {
-    let branch = current_branch()?;
-    let remote = default_remote()?;
-    run_git(&["push", "-u", &remote, &branch])
-}
-
 fn is_allowed_command(line: &str) -> bool {
     line.starts_with("git ") || line.starts_with("UNRECOVERABLE")
 }

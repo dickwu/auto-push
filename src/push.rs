@@ -41,18 +41,14 @@ fn push_submodules(ctx: &Context) -> Result<()> {
     }
 
     if !failures.is_empty() {
-        bail!(
-            "failed to push submodule(s): {}",
-            failures.join(", ")
-        );
+        bail!("failed to push submodule(s): {}", failures.join(", "));
     }
 
     Ok(())
 }
 
 fn check_has_unpushed(path: &str) -> Result<bool> {
-    let (stdout, _, _) =
-        git::run_git_check(&["-C", path, "log", "--oneline", "@{u}..HEAD"])?;
+    let (stdout, _, _) = git::run_git_check(&["-C", path, "log", "--oneline", "@{u}..HEAD"])?;
     Ok(!stdout.is_empty())
 }
 
@@ -140,8 +136,6 @@ fn push_repo(_ctx: &Context, remote: &str, branch: &str, set_upstream: bool) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_branch_protection_message_detected() {
         let msg = "error: GH006: Protected branch update failed for refs/heads/main.";
