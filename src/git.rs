@@ -188,10 +188,19 @@ pub fn push() -> Result<String> {
     run_git(&["push", "-u", &remote, &branch])
 }
 
+fn is_allowed_command(line: &str) -> bool {
+    line.starts_with("git ") || line.starts_with("UNRECOVERABLE")
+}
+
 pub fn run_commands(commands: &str) -> Result<()> {
     for line in commands.lines() {
         let line = line.trim();
         if line.is_empty() {
+            continue;
+        }
+        if !is_allowed_command(line) {
+            eprintln!("  Skipped (not a git command): {line}");
+            eprintln!("  Run manually if needed.");
             continue;
         }
         println!("  $ {line}");
@@ -227,4 +236,35 @@ pub fn has_conflicts() -> Result<bool> {
 pub fn abort_merge() -> Result<()> {
     run_git(&["merge", "--abort"])?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_git_command_allows_git() {
+        assert!(is_allowed_command("git push origin main"));
+        assert!(is_allowed_command("git rebase --continue"));
+        assert!(is_allowed_command("git fetch --all"));
+    }
+
+    #[test]
+    fn test_validate_git_command_rejects_non_git() {
+        assert!(!is_allowed_command("rm -rf /"));
+        assert!(!is_allowed_command("curl http://evil.com"));
+        assert!(!is_allowed_command("echo pwned"));
+    }
+
+    #[test]
+    fn test_validate_git_command_allows_unrecoverable() {
+        assert!(is_allowed_command("UNRECOVERABLE: no network"));
+    }
+
+    #[test]
+    fn test_is_allowed_command_edge_cases() {
+        assert!(is_allowed_command("git status"));
+        assert!(!is_allowed_command(" git status")); // leading space
+        assert!(!is_allowed_command(""));
+    }
 }
