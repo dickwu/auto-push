@@ -74,6 +74,10 @@ fn commit_with_claude(ctx: &Context, pull_outcome: &PullOutcome) -> Result<()> {
     };
 
     let commit_groups = dedup_commit_groups(commit_groups);
+
+    // Ensure all hunks are covered — Claude may omit some IDs from its plan
+    let commit_groups = ensure_all_hunks_covered(commit_groups, &hunks);
+
     let total = commit_groups.len();
     println!("\n[commit] {total} commit(s) planned by Claude:\n");
 
@@ -172,6 +176,35 @@ fn dedup_commit_groups(groups: Vec<claude::CommitGroup>) -> Vec<claude::CommitGr
         .collect()
 }
 
+/// If Claude's commit plan doesn't cover all hunk IDs, add a catch-all group
+/// for the remaining hunks so no changes are silently dropped.
+fn ensure_all_hunks_covered(
+    mut groups: Vec<claude::CommitGroup>,
+    all_hunks: &[diff::DiffHunk],
+) -> Vec<claude::CommitGroup> {
+    let covered: HashSet<usize> = groups.iter().flat_map(|g| g.hunks.iter().copied()).collect();
+    let missing: Vec<usize> = all_hunks
+        .iter()
+        .map(|h| h.id)
+        .filter(|id| !covered.contains(id))
+        .collect();
+
+    if !missing.is_empty() {
+        let files = resolve_files(all_hunks, &missing);
+        eprintln!(
+            "[commit] Warning: Claude's plan missed {} hunk(s) in {}. Adding catch-all commit.",
+            missing.len(),
+            files.join(", ")
+        );
+        groups.push(claude::CommitGroup {
+            message: "chore: stage remaining changes".to_string(),
+            hunks: missing,
+        });
+    }
+
+    groups
+}
+
 /// Resolve hunk IDs to their unique file paths for display.
 fn resolve_files(all_hunks: &[diff::DiffHunk], hunk_ids: &[usize]) -> Vec<String> {
     let matched = hunk_ids
@@ -235,6 +268,59 @@ mod tests {
         assert_eq!(deduped[0].hunks, vec![1, 2, 3]);
         // Hunk 2 was already claimed, only 4 remains
         assert_eq!(deduped[1].hunks, vec![4]);
+    }
+
+    #[test]
+    fn test_ensure_all_hunks_covered_adds_missing() {
+        let hunks = vec![
+            diff::DiffHunk {
+                id: 1,
+                file_path: "a.rs".to_string(),
+                file_header: String::new(),
+                hunk_header: "@@ -1 +1 @@".to_string(),
+                body: String::new(),
+            },
+            diff::DiffHunk {
+                id: 2,
+                file_path: "b.rs".to_string(),
+                file_header: String::new(),
+                hunk_header: "@@ -1 +1 @@".to_string(),
+                body: String::new(),
+            },
+            diff::DiffHunk {
+                id: 3,
+                file_path: "c.rs".to_string(),
+                file_header: String::new(),
+                hunk_header: "@@ -1 +1 @@".to_string(),
+                body: String::new(),
+            },
+        ];
+        let groups = vec![claude::CommitGroup {
+            message: "feat: only covers hunk 1".to_string(),
+            hunks: vec![1],
+        }];
+        let result = ensure_all_hunks_covered(groups, &hunks);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].hunks, vec![1]);
+        assert_eq!(result[1].hunks, vec![2, 3]);
+        assert_eq!(result[1].message, "chore: stage remaining changes");
+    }
+
+    #[test]
+    fn test_ensure_all_hunks_covered_noop_when_complete() {
+        let hunks = vec![diff::DiffHunk {
+            id: 1,
+            file_path: "a.rs".to_string(),
+            file_header: String::new(),
+            hunk_header: "@@ -1 +1 @@".to_string(),
+            body: String::new(),
+        }];
+        let groups = vec![claude::CommitGroup {
+            message: "feat: covers everything".to_string(),
+            hunks: vec![1],
+        }];
+        let result = ensure_all_hunks_covered(groups, &hunks);
+        assert_eq!(result.len(), 1); // no catch-all added
     }
 
     #[test]
