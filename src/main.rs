@@ -7,6 +7,7 @@ mod diff;
 mod git;
 mod stage_commit;
 mod push;
+mod submodule;
 
 use anyhow::{Result, bail};
 use clap::Parser;
