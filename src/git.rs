@@ -7,7 +7,7 @@ pub struct GitStatus {
     pub untracked: Vec<String>,
 }
 
-fn run_git(args: &[&str]) -> Result<String> {
+pub fn run_git(args: &[&str]) -> Result<String> {
     let output = Command::new("git")
         .args(args)
         .output()
@@ -236,6 +236,177 @@ pub fn has_conflicts() -> Result<bool> {
 pub fn abort_merge() -> Result<()> {
     run_git(&["merge", "--abort"])?;
     Ok(())
+}
+
+/// Run a git command, returning Ok(output) even on non-zero exit.
+pub fn run_git_check(args: &[&str]) -> Result<(String, String, bool)> {
+    let output = Command::new("git")
+        .args(args)
+        .output()
+        .with_context(|| format!("failed to run: git {}", args.join(" ")))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    Ok((stdout, stderr, output.status.success()))
+}
+
+pub fn is_detached_head() -> Result<bool> {
+    let (_, _, success) = run_git_check(&["symbolic-ref", "-q", "HEAD"])?;
+    Ok(!success)
+}
+
+pub fn has_remote() -> Result<bool> {
+    let remotes = run_git(&["remote"])?;
+    Ok(!remotes.is_empty())
+}
+
+pub fn has_upstream() -> Result<bool> {
+    let (_, _, success) = run_git_check(&["rev-parse", "--abbrev-ref", "@{u}"])?;
+    Ok(success)
+}
+
+pub fn is_shallow() -> Result<bool> {
+    let output = run_git(&["rev-parse", "--is-shallow-repository"])?;
+    Ok(output == "true")
+}
+
+pub fn repo_root() -> Result<String> {
+    run_git(&["rev-parse", "--show-toplevel"])
+}
+
+pub fn has_gitmodules() -> Result<bool> {
+    let root = repo_root()?;
+    let gitmodules = std::path::Path::new(&root).join(".gitmodules");
+    Ok(gitmodules.exists())
+}
+
+pub fn has_lfs() -> Result<bool> {
+    let root = repo_root()?;
+    let gitattributes = std::path::Path::new(&root).join(".gitattributes");
+    if !gitattributes.exists() {
+        return Ok(false);
+    }
+    let content = std::fs::read_to_string(&gitattributes)
+        .with_context(|| format!("failed to read {}", gitattributes.display()))?;
+    Ok(content.contains("filter=lfs"))
+}
+
+pub fn submodule_paths() -> Result<Vec<String>> {
+    let (stdout, _, success) = run_git_check(&["submodule", "status", "--recursive"])?;
+    if !success || stdout.is_empty() {
+        return Ok(vec![]);
+    }
+    let paths = stdout
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim_start_matches([' ', '+', '-', 'U']);
+            trimmed.split_whitespace().nth(1).map(String::from)
+        })
+        .collect();
+    Ok(paths)
+}
+
+pub fn submodule_update_init() -> Result<()> {
+    run_git(&["submodule", "update", "--init", "--recursive"])?;
+    Ok(())
+}
+
+pub fn submodule_is_dirty(path: &str) -> Result<bool> {
+    let (stdout, _, _) = run_git_check(&["-C", path, "status", "--porcelain"])?;
+    Ok(!stdout.is_empty())
+}
+
+pub fn submodule_tracking_branch(path: &str) -> Result<Option<String>> {
+    let (stdout, _, success) = run_git_check(&[
+        "config",
+        "-f",
+        ".gitmodules",
+        &format!("submodule.{path}.branch"),
+    ])?;
+    if success && !stdout.is_empty() {
+        return Ok(Some(stdout));
+    }
+    let (stdout, _, success) = run_git_check(&["-C", path, "remote", "show", "origin"])?;
+    if success {
+        for line in stdout.lines() {
+            if line.contains("HEAD branch:")
+                && let Some(branch) = line.split(':').nth(1)
+            {
+                return Ok(Some(branch.trim().to_string()));
+            }
+        }
+    }
+    Ok(None)
+}
+
+pub fn has_dirty_working_tree() -> Result<bool> {
+    let (stdout, _, _) = run_git_check(&["status", "--porcelain"])?;
+    Ok(!stdout.is_empty())
+}
+
+pub fn stash_push() -> Result<()> {
+    run_git(&[
+        "stash",
+        "push",
+        "--include-untracked",
+        "-m",
+        "auto-push: pre-pull stash",
+    ])?;
+    Ok(())
+}
+
+pub fn stash_pop() -> Result<bool> {
+    let (_, stderr, success) = run_git_check(&["stash", "pop"])?;
+    if !success && stderr.contains("CONFLICT") {
+        return Ok(false);
+    }
+    if !success {
+        anyhow::bail!("git stash pop failed: {stderr}");
+    }
+    Ok(true)
+}
+
+pub fn pull_rebase() -> Result<PullResult> {
+    let output = Command::new("git")
+        .args(["pull", "--rebase"])
+        .output()
+        .context("failed to run: git pull --rebase")?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{stdout}{stderr}");
+    if !output.status.success() {
+        if combined.contains("CONFLICT") || combined.contains("could not apply") {
+            return Ok(PullResult::Conflict);
+        }
+        bail!("git pull --rebase failed: {}", stderr.trim());
+    }
+    if combined.contains("Already up to date") {
+        Ok(PullResult::AlreadyUpToDate)
+    } else if combined.contains("Fast-forward") || combined.contains("fast-forward") {
+        Ok(PullResult::FastForward)
+    } else {
+        Ok(PullResult::Merged)
+    }
+}
+
+pub fn rebase_continue() -> Result<bool> {
+    let (_, stderr, success) = run_git_check(&["rebase", "--continue"])?;
+    if !success && (stderr.contains("CONFLICT") || stderr.contains("could not apply")) {
+        return Ok(false);
+    }
+    Ok(success)
+}
+
+pub fn rebase_abort() -> Result<()> {
+    run_git(&["rebase", "--abort"])?;
+    Ok(())
+}
+
+pub fn push_to(remote: &str, branch: &str, set_upstream: bool) -> Result<String> {
+    if set_upstream {
+        run_git(&["push", "-u", remote, branch])
+    } else {
+        run_git(&["push", remote, branch])
+    }
 }
 
 #[cfg(test)]
