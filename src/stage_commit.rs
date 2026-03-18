@@ -184,7 +184,7 @@ fn resolve_files(all_hunks: &[diff::DiffHunk], hunk_ids: &[usize]) -> Vec<String
 pub fn count_staged_files(staged_stat: &str) -> usize {
     staged_stat
         .lines()
-        .filter(|l| !l.trim().is_empty() && !l.trim_start().starts_with("changed"))
+        .filter(|l| !l.trim().is_empty() && l.contains('|'))
         .count()
 }
 
