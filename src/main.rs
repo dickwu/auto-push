@@ -1,4 +1,5 @@
 mod claude;
+mod context;
 mod diff;
 mod git;
 
