@@ -30,7 +30,12 @@ pub fn sync(ctx: &Context) -> Result<()> {
         .collect();
 
     if !dirty_pointers.is_empty() {
-        git::stage_files(&dirty_pointers.iter().map(|s| s.to_string()).collect::<Vec<_>>())?;
+        git::stage_files(
+            &dirty_pointers
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>(),
+        )?;
         println!(
             "[submodule] Staged pointer update(s) for: {}",
             dirty_pointers.join(", ")
@@ -84,8 +89,7 @@ fn process_dirty_submodule(ctx: &Context, path: &str) -> Result<()> {
     }
 
     // Check if anything is staged
-    let (_, _, nothing_staged) =
-        git::run_git_check(&["-C", path, "diff", "--cached", "--quiet"])?;
+    let (_, _, nothing_staged) = git::run_git_check(&["-C", path, "diff", "--cached", "--quiet"])?;
     if nothing_staged {
         println!("[submodule] {path}: nothing to commit after staging");
         return Ok(());
@@ -112,9 +116,7 @@ fn process_dirty_submodule(ctx: &Context, path: &str) -> Result<()> {
     };
 
     if ctx.cli.dry_run {
-        println!(
-            "[submodule] [dry-run] Would commit {path} with: {commit_message}"
-        );
+        println!("[submodule] [dry-run] Would commit {path} with: {commit_message}");
         return Ok(());
     }
 
@@ -129,8 +131,7 @@ fn process_dirty_submodule(ctx: &Context, path: &str) -> Result<()> {
 }
 
 fn ensure_on_branch(path: &str) -> Result<()> {
-    let (_, _, on_branch) =
-        git::run_git_check(&["-C", path, "symbolic-ref", "-q", "HEAD"])?;
+    let (_, _, on_branch) = git::run_git_check(&["-C", path, "symbolic-ref", "-q", "HEAD"])?;
     if on_branch {
         return Ok(());
     }
@@ -148,7 +149,9 @@ fn ensure_on_branch(path: &str) -> Result<()> {
             }
         }
         None => {
-            eprintln!("[submodule] {path}: detached HEAD and no tracking branch configured — skipping");
+            eprintln!(
+                "[submodule] {path}: detached HEAD and no tracking branch configured — skipping"
+            );
         }
     }
 

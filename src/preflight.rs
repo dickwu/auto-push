@@ -24,7 +24,9 @@ pub fn check() -> Result<PreflightResult> {
     let has_lfs = git::has_lfs()?;
 
     if is_shallow {
-        eprintln!("[preflight] Warning: shallow clone detected -- some operations may behave differently");
+        eprintln!(
+            "[preflight] Warning: shallow clone detected -- some operations may behave differently"
+        );
     }
 
     if has_lfs {
@@ -40,7 +42,11 @@ pub fn check() -> Result<PreflightResult> {
         bail!(
             "unresolved conflicts from a previous merge.\n\
              Resolve them before running auto-push:\n{}",
-            conflicts.iter().map(|f| format!("  - {f}")).collect::<Vec<_>>().join("\n")
+            conflicts
+                .iter()
+                .map(|f| format!("  - {f}"))
+                .collect::<Vec<_>>()
+                .join("\n")
         );
     }
 
@@ -59,9 +65,21 @@ pub fn check() -> Result<PreflightResult> {
         } else {
             None
         },
-        if has_lfs { Some("LFS detected".to_string()) } else { None },
-        if is_shallow { Some("shallow clone".to_string()) } else { None },
-        if !has_upstream { Some("no upstream".to_string()) } else { None },
+        if has_lfs {
+            Some("LFS detected".to_string())
+        } else {
+            None
+        },
+        if is_shallow {
+            Some("shallow clone".to_string())
+        } else {
+            None
+        },
+        if !has_upstream {
+            Some("no upstream".to_string())
+        } else {
+            None
+        },
     ]
     .into_iter()
     .flatten()

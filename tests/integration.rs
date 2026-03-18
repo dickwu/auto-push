@@ -1,5 +1,5 @@
-use std::process::Command;
 use std::path::Path;
+use std::process::Command;
 
 fn git_in(dir: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
@@ -23,10 +23,7 @@ fn auto_push_bin() -> Command {
 #[test]
 fn test_preflight_detects_not_a_repo() {
     let dir = tempfile::tempdir().unwrap();
-    let output = auto_push_bin()
-        .current_dir(dir.path())
-        .output()
-        .unwrap();
+    let output = auto_push_bin().current_dir(dir.path()).output().unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
     let combined = format!("{stdout}{stderr}");
@@ -45,10 +42,7 @@ fn test_preflight_detects_no_remote() {
     git_in(dir.path(), &["add", "."]);
     git_in(dir.path(), &["commit", "-m", "init"]);
 
-    let output = auto_push_bin()
-        .current_dir(dir.path())
-        .output()
-        .unwrap();
+    let output = auto_push_bin().current_dir(dir.path()).output().unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
     let combined = format!("{stdout}{stderr}");
@@ -64,26 +58,30 @@ fn test_preflight_detects_no_remote() {
 
 #[test]
 fn test_help_shows_new_flags() {
-    let output = auto_push_bin()
-        .arg("--help")
-        .output()
-        .unwrap();
+    let output = auto_push_bin().arg("--help").output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("--rebase"), "Missing --rebase flag in help");
-    assert!(stdout.contains("--no-pull"), "Missing --no-pull flag in help");
-    assert!(stdout.contains("--no-submodules"), "Missing --no-submodules flag in help");
-    assert!(stdout.contains("--no-stash"), "Missing --no-stash flag in help");
+    assert!(
+        stdout.contains("--no-pull"),
+        "Missing --no-pull flag in help"
+    );
+    assert!(
+        stdout.contains("--no-submodules"),
+        "Missing --no-submodules flag in help"
+    );
+    assert!(
+        stdout.contains("--no-stash"),
+        "Missing --no-stash flag in help"
+    );
 }
 
 #[test]
-fn test_version_shows_0_2_0() {
-    let output = auto_push_bin()
-        .arg("--version")
-        .output()
-        .unwrap();
+fn test_version_shows_current() {
+    let output = auto_push_bin().arg("--version").output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let expected = env!("CARGO_PKG_VERSION");
     assert!(
-        stdout.contains("0.2.0"),
-        "Expected version 0.2.0, got: {stdout}"
+        stdout.contains(expected),
+        "Expected version {expected}, got: {stdout}"
     );
 }

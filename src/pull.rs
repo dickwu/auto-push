@@ -111,7 +111,9 @@ fn resolve_rebase_conflicts(ctx: &Context) -> Result<()> {
         }
     }
 
-    eprintln!("[pull] Rebase exceeded {MAX_REBASE_ITERATIONS} conflict resolution steps. Aborting.");
+    eprintln!(
+        "[pull] Rebase exceeded {MAX_REBASE_ITERATIONS} conflict resolution steps. Aborting."
+    );
     git::rebase_abort()?;
     bail!("rebase too conflicted -- resolve manually or use merge-based pull");
 }

@@ -2,6 +2,7 @@ mod claude;
 mod context;
 mod diff;
 mod git;
+mod pre_push;
 mod preflight;
 mod pull;
 mod push;
@@ -12,6 +13,7 @@ mod submodule;
 use anyhow::Result;
 use clap::Parser;
 use context::CliFlags;
+use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
@@ -46,6 +48,10 @@ struct Cli {
     #[arg(long)]
     no_stash: bool,
 
+    /// Skip pre-push checks even if .pre-push.json exists
+    #[arg(long)]
+    no_pre_push: bool,
+
     /// Review and confirm before each action
     #[arg(short = 'c', long)]
     confirm: bool,
@@ -65,12 +71,23 @@ struct Cli {
     /// Pull with rebase instead of merge
     #[arg(short = 'r', long)]
     rebase: bool,
+
+    /// Generate a .pre-push.json config file in the repo root and exit
+    #[arg(long)]
+    init_pre_push: bool,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
     println!("auto-push v{}", env!("CARGO_PKG_VERSION"));
+
+    // Standalone: generate .pre-push.json and exit
+    if cli.init_pre_push {
+        git::ensure_git_repo()?;
+        let root = PathBuf::from(git::repo_root()?);
+        return pre_push::init_config(&root);
+    }
 
     // Phase 1: Preflight
     let preflight_result = preflight::check()?;
@@ -83,6 +100,7 @@ fn main() -> Result<()> {
             no_pull: cli.no_pull,
             no_stash: cli.no_stash,
             no_submodules: cli.no_submodules,
+            no_pre_push: cli.no_pre_push,
             confirm: cli.confirm,
             dry_run: cli.dry_run,
             message: cli.message,
@@ -103,10 +121,17 @@ fn main() -> Result<()> {
     // Phase 5: Unstash (restore changes for commit)
     stash::auto_unstash(&stash_result)?;
 
-    // Phase 6: Stage & Commit
+    // Phase 6: Pre-push checks (after pull + unstash so we validate the full state)
+    if !ctx.cli.no_pre_push
+        && let Some(config) = pre_push::load_config(&ctx.preflight.repo_root)?
+    {
+        pre_push::run_pre_push(&config, ctx.cli.dry_run)?;
+    }
+
+    // Phase 7: Stage & Commit
     stage_commit::run(&ctx, &pull_outcome)?;
 
-    // Phase 7: Push (submodules first, then parent)
+    // Phase 8: Push (submodules first, then parent)
     push::run(&ctx)?;
 
     Ok(())

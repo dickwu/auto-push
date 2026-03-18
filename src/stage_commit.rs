@@ -182,7 +182,10 @@ fn ensure_all_hunks_covered(
     mut groups: Vec<claude::CommitGroup>,
     all_hunks: &[diff::DiffHunk],
 ) -> Vec<claude::CommitGroup> {
-    let covered: HashSet<usize> = groups.iter().flat_map(|g| g.hunks.iter().copied()).collect();
+    let covered: HashSet<usize> = groups
+        .iter()
+        .flat_map(|g| g.hunks.iter().copied())
+        .collect();
     let missing: Vec<usize> = all_hunks
         .iter()
         .map(|h| h.id)

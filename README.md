@@ -51,16 +51,64 @@ auto-push --no-push
 
 # Use your own commit message
 auto-push -m "feat: add user auth"
+
+# Pull with rebase instead of merge
+auto-push --rebase
+```
+
+## Pre-push checks
+
+auto-push supports running checks (tests, linting, etc.) before committing and pushing. Checks run after `git pull` so they validate the combined state of remote + local changes.
+
+### Setup
+
+Generate a `.pre-push.json` config in your repo root:
+
+```bash
+auto-push --init-pre-push
+```
+
+This detects your project type and creates a sensible default:
+
+- **Rust** — `cargo test`, `cargo clippy`, `cargo fmt --check`
+- **Node.js** — `npm test`, `npm run lint`
+- **Python** — `pytest`, `ruff check`
+- **Go** — `go test ./...`, `go vet ./...`
+
+### Config format
+
+```json
+{
+  "commands": [
+    {
+      "name": "tests",
+      "run": "cargo test"
+    },
+    {
+      "name": "lint",
+      "run": "cargo clippy -- -D warnings"
+    }
+  ]
+}
+```
+
+Commands run sequentially. If any command fails, the push is aborted (your changes remain uncommitted).
+
+### Skip checks
+
+```bash
+auto-push --no-pre-push
 ```
 
 ## How it works
 
-1. `git pull` to sync with remote
-2. Detect staged, unstaged, and untracked changes
-3. `git add -A` to stage everything
-4. Get the diff and send it to Claude CLI for commit message generation
-5. `git commit` with the generated message
-6. Push via `gh` / `git push`
+1. `git pull` to sync with remote (with auto-stash if needed)
+2. Run pre-push checks if `.pre-push.json` exists
+3. Detect staged, unstaged, and untracked changes
+4. `git add -A` to stage everything
+5. Get the diff and send it to Claude CLI for commit message generation
+6. `git commit` with the generated message
+7. Push via `git push`
 
 If the pull required a merge, Claude uses a more detailed prompt to describe the merge context. For clean pulls, it uses a simple single-line format.
 
