@@ -98,9 +98,8 @@ pub fn sanitize_template_value(raw: &str) -> String {
     // Normalise carriage returns first so we can process line-by-line
     let no_cr = trimmed.replace("\r\n", "\n").replace('\r', "");
 
-    // Escape shell metacharacters (excluding backslash — handled next).
-    // Backslash is excluded here to avoid double-escaping the `\n` we will add.
-    let shell_chars = ['\'', '"', '`', '$', '!', '(', ')', '|', '&', ';', '<', '>'];
+    // Escape shell metacharacters including backslash.
+    let shell_chars = ['\'', '"', '`', '$', '!', '(', ')', '|', '&', ';', '<', '>', '\\'];
     let mut escaped = String::with_capacity(no_cr.len());
     for ch in no_cr.chars() {
         if shell_chars.contains(&ch) {
@@ -113,8 +112,14 @@ pub fn sanitize_template_value(raw: &str) -> String {
     // (after shell-char escaping so the inserted backslash is not re-escaped).
     let normalised = escaped.replace('\n', "\\n");
 
-    // Truncate to 4096 chars (by char count to avoid splitting multi-byte)
-    normalised.chars().take(4096).collect()
+    // Truncate to 4096 chars (by char count to avoid splitting multi-byte),
+    // appending a marker so callers know the value was truncated.
+    if normalised.chars().count() > 4096 {
+        let truncated: String = normalised.chars().take(4096).collect();
+        format!("{truncated}...(truncated)")
+    } else {
+        normalised
+    }
 }
 
 /// Render a template string, replacing `{{ var }}` patterns using the
@@ -150,7 +155,7 @@ fn resolve_expression(
         "commit_hash" => Some(sanitize_template_value(&ctx.commit_hash)),
         "command_name" => Some(sanitize_template_value(command_name)),
         "command_run" => Some(sanitize_template_value(command_run)),
-        "phase" => Some(phase.label().to_string()),
+        "command_type" => Some(phase.label().to_string()),
         _ if expr.starts_with("command_output.") => Some(resolve_command_output(
             &expr["command_output.".len()..],
             ctx,
@@ -170,14 +175,15 @@ fn resolve_command_output(expr: &str, ctx: &TemplateContext) -> String {
             .get(name)
             .map(String::as_str)
             .unwrap_or("");
-        let sanitized = sanitize_template_value(raw_output);
 
-        // Extract regex pattern from /pattern/
+        // Extract regex pattern from /pattern/ — operate on raw output first,
+        // then sanitize the extracted result.
         if rest.starts_with('/') && rest.ends_with('/') && rest.len() > 2 {
             let pattern = &rest[1..rest.len() - 1];
-            extract_regex(&sanitized, pattern)
+            let extracted = extract_regex(raw_output, pattern);
+            sanitize_template_value(&extracted)
         } else {
-            sanitized
+            sanitize_template_value(raw_output)
         }
     } else {
         let name = expr.trim();
@@ -498,8 +504,8 @@ pub fn default_pre_push_commands(repo_root: &Path) -> Vec<HookCommand> {
 
 fn default_after_push_commands() -> Vec<HookCommand> {
     vec![HookCommand {
-        name: "notify".into(),
-        run: "echo 'Pushed branch {{ branch }} to {{ remote }}'".into(),
+        name: "example".into(),
+        run: "echo 'Pushed {{ branch }} ({{ commit_hash }})'".into(),
         on_error: None,
     }]
 }
@@ -666,7 +672,8 @@ mod tests {
     fn test_sanitize_truncates_long_output() {
         let long_string = "a".repeat(5000);
         let result = sanitize_template_value(&long_string);
-        assert_eq!(result.chars().count(), 4096);
+        assert!(result.ends_with("...(truncated)"), "should end with truncation marker");
+        assert!(result.len() > 4096, "total length should exceed 4096 due to appended marker");
     }
 
     // -----------------------------------------------------------------------
@@ -690,7 +697,7 @@ mod tests {
     fn test_render_template_command_context_vars() {
         let ctx = make_ctx();
         let out = render_template(
-            "running {{ command_name }} ({{ command_run }}) in {{ phase }}",
+            "running {{ command_name }} ({{ command_run }}) in {{ command_type }}",
             &ctx,
             "my-cmd",
             "echo hi",
