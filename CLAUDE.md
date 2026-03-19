@@ -23,13 +23,22 @@ cargo fmt -- --check         # Check formatting without modifying
 
 ## Architecture
 
-Rust binary crate with three modules:
+Rust binary crate with these modules:
 
 - `src/main.rs` — Entry point, CLI arg parsing (`clap` derive), orchestration flow
 - `src/git.rs` — Git operations via `std::process::Command`, push via `gh` with `git push` fallback
 - `src/claude.rs` — Invokes local `claude -p` CLI with diff to generate commit messages; uses simple prompt for clean pulls, detailed prompt when merge occurred
+- `src/hooks.rs` — Unified hook system: pre_push/after_push commands via `.auto-push.json`, template engine with `{{ var }}` substitution and regex extraction, output chaining between commands, per-command `on_error` handlers
+- `src/context.rs` — CLI flags and runtime context
+- `src/push.rs` — Push logic with retry, protected branch detection, Claude-assisted error recovery
+- `src/pull.rs` — Pull with rebase support and conflict detection
+- `src/stage_commit.rs` — Staging, hunk-level commit splitting via Claude
+- `src/stash.rs` — Auto-stash/unstash around pull
+- `src/submodule.rs` — Submodule sync and push
+- `src/preflight.rs` — Pre-run checks (git repo, remote, branch detection)
+- `src/diff.rs` — Diff parsing and hunk extraction
 
-Flow: `git pull` → detect changes → `git add -A` → get diff → call `claude` CLI → `git commit` → push via `gh`
+Flow: `git pull` → detect changes → pre-push hooks → `git add -A` → get diff → call `claude` CLI → `git commit` → push → after-push hooks
 
 ## CI/CD
 
