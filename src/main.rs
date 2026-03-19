@@ -154,7 +154,10 @@ fn main() -> Result<()> {
         let mut template_ctx = hooks::TemplateContext {
             branch: ctx.preflight.branch.clone(),
             remote: ctx.preflight.remote.clone(),
-            commit_hash: git::run_git(&["rev-parse", "HEAD"]).unwrap_or_default(),
+            commit_hash: git::run_git(&["rev-parse", "HEAD"]).unwrap_or_else(|_| {
+                eprintln!("[hooks] Warning: could not resolve HEAD commit hash");
+                String::new()
+            }),
             command_outputs: std::collections::HashMap::new(),
         };
         hooks::run_phase(
@@ -180,7 +183,10 @@ fn main() -> Result<()> {
         let mut template_ctx = hooks::TemplateContext {
             branch: ctx.preflight.branch.clone(),
             remote: ctx.preflight.remote.clone(),
-            commit_hash: git::run_git(&["rev-parse", "HEAD"]).unwrap_or_default(),
+            commit_hash: git::run_git(&["rev-parse", "HEAD"]).unwrap_or_else(|_| {
+                eprintln!("[hooks] Warning: could not resolve HEAD commit hash");
+                String::new()
+            }),
             command_outputs: std::collections::HashMap::new(),
         };
         if let Err(e) = hooks::run_phase(

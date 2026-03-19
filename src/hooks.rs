@@ -331,8 +331,14 @@ fn execute_command(cmd: &str) -> Result<(String, bool)> {
         .spawn()
         .with_context(|| format!("failed to run: {}", cmd))?;
 
-    let stdout = child.stdout.take().expect("stdout was piped");
-    let stderr = child.stderr.take().expect("stderr was piped");
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("stdout pipe unavailable"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("stderr pipe unavailable"))?;
 
     let t1 = thread::spawn(move || {
         BufReader::new(stdout)
