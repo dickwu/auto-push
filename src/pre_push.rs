@@ -35,6 +35,26 @@ pub fn load_config(repo_root: &Path) -> Result<Option<PrePushConfig>> {
     Ok(Some(config))
 }
 
+pub fn show_config(repo_root: &Path) -> Result<()> {
+    let config = load_config(repo_root)?;
+    match config {
+        Some(cfg) if !cfg.commands.is_empty() => {
+            println!(
+                "[pre-push] {} command(s) in {}:",
+                cfg.commands.len(),
+                config_path(repo_root).display()
+            );
+            for (i, cmd) in cfg.commands.iter().enumerate() {
+                println!("  {}) {} — {}", i + 1, cmd.name, cmd.run);
+            }
+        }
+        _ => {
+            println!("[pre-push] No config found. Run with --init-pre-push to create one.");
+        }
+    }
+    Ok(())
+}
+
 pub fn init_config(repo_root: &Path) -> Result<()> {
     let path = config_path(repo_root);
     if path.exists() {
@@ -356,6 +376,34 @@ mod tests {
         let result = run_pre_push(&config, false);
         assert!(result.is_err());
         assert!(!marker.exists(), "second command should not have run");
+    }
+
+    #[test]
+    fn test_show_config_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        // Should succeed and print "No config found" message
+        show_config(dir.path()).unwrap();
+    }
+
+    #[test]
+    fn test_show_config_with_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_json = r#"{
+            "commands": [
+                {"name": "tests", "run": "cargo test"},
+                {"name": "lint", "run": "cargo clippy"}
+            ]
+        }"#;
+        fs::write(dir.path().join(".pre-push.json"), config_json).unwrap();
+        show_config(dir.path()).unwrap();
+    }
+
+    #[test]
+    fn test_show_config_empty_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(".pre-push.json"), r#"{"commands": []}"#).unwrap();
+        // Empty commands should show "No config found" message
+        show_config(dir.path()).unwrap();
     }
 
     #[test]

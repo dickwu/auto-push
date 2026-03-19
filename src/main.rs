@@ -75,6 +75,10 @@ struct Cli {
     /// Generate a .pre-push.json config file in the repo root and exit
     #[arg(long)]
     init_pre_push: bool,
+
+    /// Show the current pre-push commands and exit
+    #[arg(long)]
+    show_pre_push: bool,
 }
 
 fn main() -> Result<()> {
@@ -87,6 +91,13 @@ fn main() -> Result<()> {
         git::ensure_git_repo()?;
         let root = PathBuf::from(git::repo_root()?);
         return pre_push::init_config(&root);
+    }
+
+    // Standalone: show current pre-push commands and exit
+    if cli.show_pre_push {
+        git::ensure_git_repo()?;
+        let root = PathBuf::from(git::repo_root()?);
+        return pre_push::show_config(&root);
     }
 
     // Phase 1: Preflight
