@@ -3,7 +3,6 @@ mod context;
 mod diff;
 mod git;
 mod hooks;
-mod pre_push;
 mod preflight;
 mod pull;
 mod push;
@@ -49,9 +48,17 @@ struct Cli {
     #[arg(long)]
     no_stash: bool,
 
-    /// Skip pre-push checks even if .pre-push.json exists
+    /// Skip pre-push hooks even if .auto-push.json exists
     #[arg(long)]
     no_pre_push: bool,
+
+    /// Skip after-push hooks even if .auto-push.json exists
+    #[arg(long)]
+    no_after_push: bool,
+
+    /// Skip all hooks (pre-push and after-push)
+    #[arg(long)]
+    no_hooks: bool,
 
     /// Review and confirm before each action
     #[arg(short = 'c', long)]
@@ -73,13 +80,13 @@ struct Cli {
     #[arg(short = 'r', long)]
     rebase: bool,
 
-    /// Generate a .pre-push.json config file in the repo root and exit
+    /// Generate a .auto-push.json config file in the repo root and exit
     #[arg(long)]
-    init_pre_push: bool,
+    init_hooks: bool,
 
-    /// Show the current pre-push commands and exit
+    /// Show the current hook commands and exit
     #[arg(long)]
-    show_pre_push: bool,
+    show_hooks: bool,
 }
 
 fn main() -> Result<()> {
@@ -87,18 +94,16 @@ fn main() -> Result<()> {
 
     println!("auto-push v{}", env!("CARGO_PKG_VERSION"));
 
-    // Standalone: generate .pre-push.json and exit
-    if cli.init_pre_push {
+    if cli.init_hooks {
         git::ensure_git_repo()?;
         let root = PathBuf::from(git::repo_root()?);
-        return pre_push::init_config(&root);
+        return hooks::init_config(&root);
     }
 
-    // Standalone: show current pre-push commands and exit
-    if cli.show_pre_push {
+    if cli.show_hooks {
         git::ensure_git_repo()?;
         let root = PathBuf::from(git::repo_root()?);
-        return pre_push::show_config(&root);
+        return hooks::show_config(&root);
     }
 
     // Phase 1: Preflight
@@ -113,8 +118,8 @@ fn main() -> Result<()> {
             no_stash: cli.no_stash,
             no_submodules: cli.no_submodules,
             no_pre_push: cli.no_pre_push,
-            no_after_push: false,
-            no_hooks: false,
+            no_after_push: cli.no_after_push,
+            no_hooks: cli.no_hooks,
             confirm: cli.confirm,
             dry_run: cli.dry_run,
             message: cli.message,
@@ -135,11 +140,24 @@ fn main() -> Result<()> {
     // Phase 5: Unstash (restore changes for commit)
     stash::auto_unstash(&stash_result)?;
 
-    // Phase 6: Pre-push checks (after pull + unstash so we validate the full state)
-    if !ctx.cli.no_pre_push
-        && let Some(config) = pre_push::load_config(&ctx.preflight.repo_root)?
+    // Phase 6: Pre-push hooks
+    let hooks_config = if !ctx.cli.no_hooks {
+        hooks::load_config(&ctx.preflight.repo_root)?
+    } else {
+        None
+    };
+
+    if !ctx.cli.no_hooks
+        && !ctx.cli.no_pre_push
+        && let Some(ref config) = hooks_config
     {
-        pre_push::run_pre_push(&config, ctx.cli.dry_run)?;
+        let mut template_ctx = hooks::TemplateContext {
+            branch: ctx.preflight.branch.clone(),
+            remote: ctx.preflight.remote.clone(),
+            commit_hash: git::run_git(&["rev-parse", "HEAD"]).unwrap_or_default(),
+            command_outputs: std::collections::HashMap::new(),
+        };
+        hooks::run_phase(hooks::HookPhase::PrePush, config, &mut template_ctx, ctx.cli.dry_run)?;
     }
 
     // Phase 7: Stage & Commit
@@ -147,6 +165,23 @@ fn main() -> Result<()> {
 
     // Phase 8: Push (submodules first, then parent)
     push::run(&ctx)?;
+
+    // Phase 9: After-push hooks (only if push actually happened)
+    if !ctx.cli.no_push
+        && !ctx.cli.no_hooks
+        && !ctx.cli.no_after_push
+        && let Some(ref config) = hooks_config
+    {
+        let mut template_ctx = hooks::TemplateContext {
+            branch: ctx.preflight.branch.clone(),
+            remote: ctx.preflight.remote.clone(),
+            commit_hash: git::run_git(&["rev-parse", "HEAD"]).unwrap_or_default(),
+            command_outputs: std::collections::HashMap::new(),
+        };
+        if let Err(e) = hooks::run_phase(hooks::HookPhase::AfterPush, config, &mut template_ctx, ctx.cli.dry_run) {
+            eprintln!("[after_push] Warning: {e}");
+        }
+    }
 
     Ok(())
 }
