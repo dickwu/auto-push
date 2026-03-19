@@ -100,7 +100,9 @@ pub fn sanitize_template_value(raw: &str) -> String {
     let no_cr = trimmed.replace("\r\n", "\n").replace('\r', "");
 
     // Escape shell metacharacters including backslash.
-    let shell_chars = ['\'', '"', '`', '$', '!', '(', ')', '|', '&', ';', '<', '>', '\\'];
+    let shell_chars = [
+        '\'', '"', '`', '$', '!', '(', ')', '|', '&', ';', '<', '>', '\\',
+    ];
     let mut escaped = String::with_capacity(no_cr.len());
     for ch in no_cr.chars() {
         if shell_chars.contains(&ch) {
@@ -674,8 +676,14 @@ mod tests {
     fn test_sanitize_truncates_long_output() {
         let long_string = "a".repeat(5000);
         let result = sanitize_template_value(&long_string);
-        assert!(result.ends_with("...(truncated)"), "should end with truncation marker");
-        assert!(result.len() > 4096, "total length should exceed 4096 due to appended marker");
+        assert!(
+            result.ends_with("...(truncated)"),
+            "should end with truncation marker"
+        );
+        assert!(
+            result.len() > 4096,
+            "total length should exceed 4096 due to appended marker"
+        );
     }
 
     // -----------------------------------------------------------------------

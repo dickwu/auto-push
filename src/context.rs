@@ -4,9 +4,11 @@ pub struct PreflightResult {
     pub repo_root: PathBuf,
     pub branch: String,
     pub remote: String,
+    #[allow(dead_code)]
     pub is_shallow: bool,
     pub has_submodules: bool,
     pub submodule_paths: Vec<String>,
+    #[allow(dead_code)]
     pub has_lfs: bool,
     pub has_upstream: bool,
 }

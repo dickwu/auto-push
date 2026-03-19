@@ -1,0 +1,11 @@
+{
+  "timestamp": "2026-03-19T14:51:48.850Z",
+  "projectRoot": "/Users/gwddeveloper/opensource/auto-push",
+  "structure": {
+    "hasPackageJson": false,
+    "hasTsConfig": false,
+    "hasClaudeConfig": true,
+    "hasClaudeFlow": true
+  },
+  "scannedAt": 1773931908850
+}

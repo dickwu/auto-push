@@ -157,7 +157,12 @@ fn main() -> Result<()> {
             commit_hash: git::run_git(&["rev-parse", "HEAD"]).unwrap_or_default(),
             command_outputs: std::collections::HashMap::new(),
         };
-        hooks::run_phase(hooks::HookPhase::PrePush, config, &mut template_ctx, ctx.cli.dry_run)?;
+        hooks::run_phase(
+            hooks::HookPhase::PrePush,
+            config,
+            &mut template_ctx,
+            ctx.cli.dry_run,
+        )?;
     }
 
     // Phase 7: Stage & Commit
@@ -178,7 +183,12 @@ fn main() -> Result<()> {
             commit_hash: git::run_git(&["rev-parse", "HEAD"]).unwrap_or_default(),
             command_outputs: std::collections::HashMap::new(),
         };
-        if let Err(e) = hooks::run_phase(hooks::HookPhase::AfterPush, config, &mut template_ctx, ctx.cli.dry_run) {
+        if let Err(e) = hooks::run_phase(
+            hooks::HookPhase::AfterPush,
+            config,
+            &mut template_ctx,
+            ctx.cli.dry_run,
+        ) {
             eprintln!("[after_push] Warning: {e}");
         }
     }
