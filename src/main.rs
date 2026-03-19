@@ -2,6 +2,7 @@ mod claude;
 mod context;
 mod diff;
 mod git;
+mod hooks;
 mod pre_push;
 mod preflight;
 mod pull;
@@ -112,6 +113,8 @@ fn main() -> Result<()> {
             no_stash: cli.no_stash,
             no_submodules: cli.no_submodules,
             no_pre_push: cli.no_pre_push,
+            no_after_push: false,
+            no_hooks: false,
             confirm: cli.confirm,
             dry_run: cli.dry_run,
             message: cli.message,
