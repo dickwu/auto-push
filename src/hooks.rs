@@ -3,6 +3,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 const CONFIG_FILE: &str = ".auto-push.json";
 
@@ -122,6 +123,11 @@ pub fn sanitize_template_value(raw: &str) -> String {
     }
 }
 
+fn template_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"\{\{\s*([^}]+?)\s*\}\}").expect("static regex"))
+}
+
 /// Render a template string, replacing `{{ var }}` patterns using the
 /// provided context.  Variables that cannot be resolved are left as-is.
 pub fn render_template(
@@ -131,8 +137,7 @@ pub fn render_template(
     command_run: &str,
     phase: HookPhase,
 ) -> String {
-    // Match {{ ... }} with optional surrounding whitespace inside braces
-    let re = Regex::new(r"\{\{\s*([^}]+?)\s*\}\}").expect("static regex");
+    let re = template_regex();
 
     re.replace_all(template, |caps: &regex::Captures| {
         let expr = caps[1].trim();
@@ -315,7 +320,6 @@ pub fn run_phase(
 fn execute_command(cmd: &str) -> Result<(String, bool)> {
     use std::io::{BufRead, BufReader};
     use std::process::{Command, Stdio};
-    use std::sync::{Arc, Mutex};
     use std::thread;
 
     let mut child = Command::new("sh")
@@ -328,40 +332,38 @@ fn execute_command(cmd: &str) -> Result<(String, bool)> {
     let stdout = child.stdout.take().expect("stdout was piped");
     let stderr = child.stderr.take().expect("stderr was piped");
 
-    let stdout_buf = Arc::new(Mutex::new(String::new()));
-    let stderr_buf = Arc::new(Mutex::new(String::new()));
-
-    let out_capture = stdout_buf.clone();
     let t1 = thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            println!("{line}");
-            let mut buf = out_capture.lock().expect("stdout lock");
-            buf.push_str(&line);
-            buf.push('\n');
-        }
+        BufReader::new(stdout)
+            .lines()
+            .map_while(Result::ok)
+            .inspect(|line| println!("{line}"))
+            .collect::<Vec<_>>()
+            .join("\n")
     });
 
-    let err_capture = stderr_buf.clone();
     let t2 = thread::spawn(move || {
-        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-            eprintln!("{line}");
-            let mut buf = err_capture.lock().expect("stderr lock");
-            buf.push_str(&line);
-            buf.push('\n');
-        }
+        BufReader::new(stderr)
+            .lines()
+            .map_while(Result::ok)
+            .inspect(|line| eprintln!("{line}"))
+            .collect::<Vec<_>>()
+            .join("\n")
     });
 
     let status = child
         .wait()
         .with_context(|| format!("failed to wait for: {}", cmd))?;
-    t1.join().ok();
-    t2.join().ok();
 
-    let combined = format!(
-        "{}{}",
-        stdout_buf.lock().expect("stdout lock"),
-        stderr_buf.lock().expect("stderr lock")
-    );
+    let stdout_output = t1.join().unwrap_or_default();
+    let stderr_output = t2.join().unwrap_or_default();
+
+    let mut combined = stdout_output;
+    if !stderr_output.is_empty() {
+        if !combined.is_empty() {
+            combined.push('\n');
+        }
+        combined.push_str(&stderr_output);
+    }
     Ok((combined, status.success()))
 }
 
