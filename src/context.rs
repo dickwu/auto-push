@@ -19,6 +19,8 @@ pub struct CliFlags {
     pub no_stash: bool,
     pub no_submodules: bool,
     pub no_pre_push: bool,
+    pub no_after_push: bool,
+    pub no_hooks: bool,
     pub confirm: bool,
     pub dry_run: bool,
     pub message: Option<String>,
@@ -56,6 +58,8 @@ mod tests {
             no_stash: false,
             no_submodules: false,
             no_pre_push: false,
+            no_after_push: false,
+            no_hooks: false,
             confirm: false,
             dry_run: false,
             message: None,
@@ -73,5 +77,26 @@ mod tests {
         assert_eq!(ctx.preflight.branch, "main");
         assert!(ctx.cli.stage_all);
         assert!(!ctx.cli.rebase);
+    }
+
+    #[test]
+    fn test_cli_flags_has_hook_fields() {
+        let cli = CliFlags {
+            stage_all: true,
+            no_push: false,
+            no_pull: false,
+            no_stash: false,
+            no_submodules: false,
+            no_pre_push: false,
+            no_after_push: false,
+            no_hooks: false,
+            confirm: false,
+            dry_run: false,
+            message: None,
+            force: false,
+            rebase: false,
+        };
+        assert!(!cli.no_after_push);
+        assert!(!cli.no_hooks);
     }
 }
