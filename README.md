@@ -56,59 +56,93 @@ auto-push -m "feat: add user auth"
 auto-push --rebase
 ```
 
-## Pre-push checks
+## Hooks
 
-auto-push supports running checks (tests, linting, etc.) before committing and pushing. Checks run after `git pull` so they validate the combined state of remote + local changes.
+auto-push supports running commands before and after pushing via a `.auto-push.json` config file. Pre-push hooks run after `git pull` so they validate the combined state of remote + local changes. After-push hooks run once the push succeeds.
 
 ### Setup
 
-Generate a `.pre-push.json` config in your repo root:
+Generate a `.auto-push.json` config in your repo root:
 
 ```bash
-auto-push --init-pre-push
+auto-push --init-hooks
 ```
 
-This detects your project type and creates a sensible default:
+This detects your project type and creates sensible defaults:
 
 - **Rust** — `cargo test`, `cargo clippy`, `cargo fmt --check`
 - **Node.js** — `npm test`, `npm run lint`
 - **Python** — `pytest`, `ruff check`
 - **Go** — `go test ./...`, `go vet ./...`
 
+View the current hook configuration:
+
+```bash
+auto-push --show-hooks
+```
+
 ### Config format
 
 ```json
 {
-  "commands": [
+  "pre_push": [
     {
       "name": "tests",
+      "description": "Run the project test suite",
       "run": "cargo test"
     },
     {
       "name": "lint",
-      "run": "cargo clippy -- -D warnings"
+      "description": "Check for common mistakes and style issues",
+      "run": "cargo clippy -- -D warnings",
+      "on_error": "echo 'Lint failed — fix warnings before pushing'"
+    }
+  ],
+  "after_push": [
+    {
+      "name": "notify",
+      "description": "Print a summary of the push",
+      "run": "echo 'Pushed {{ branch }} ({{ commit_hash }})'"
     }
   ]
 }
 ```
 
-Commands run sequentially. If any command fails, the push is aborted (your changes remain uncommitted).
+Each command has a `name`, an optional `description`, a `run` string, and an optional `on_error` handler. Pre-push commands run sequentially — if any fails, the push is aborted. After-push commands continue even if one fails.
 
-### Skip checks
+### Template variables
+
+Commands support `{{ variable }}` substitution:
+
+| Variable | Description |
+|---|---|
+| `{{ branch }}` | Current branch name |
+| `{{ remote }}` | Remote name (e.g. `origin`) |
+| `{{ commit_hash }}` | HEAD commit hash |
+| `{{ command_name }}` | Name of the current command |
+| `{{ command_output.NAME }}` | Stdout of a previously run command |
+| `{{ command_output.NAME \| /regex/ }}` | Regex extraction from a command's output |
+
+### Skip hooks
 
 ```bash
-auto-push --no-pre-push
+auto-push --no-hooks        # Skip all hooks
+auto-push --no-pre-push     # Skip pre-push hooks only
+auto-push --no-after-push   # Skip after-push hooks only
 ```
 
 ## How it works
 
-1. `git pull` to sync with remote (with auto-stash if needed)
-2. Run pre-push checks if `.pre-push.json` exists
-3. Detect staged, unstaged, and untracked changes
-4. `git add -A` to stage everything
-5. Get the diff and send it to Claude CLI for commit message generation
-6. `git commit` with the generated message
-7. Push via `git push`
+1. Auto-stash dirty working tree (if needed)
+2. `git pull` to sync with remote (with rebase if `--rebase`)
+3. Sync submodules (if present)
+4. Unstash changes
+5. Run pre-push hooks (if `.auto-push.json` exists)
+6. `git add -A` to stage everything
+7. Get the diff and send it to Claude CLI for commit message generation
+8. `git commit` with the generated message
+9. Push via `gh` (falls back to `git push`)
+10. Run after-push hooks
 
 If the pull required a merge, Claude uses a more detailed prompt to describe the merge context. For clean pulls, it uses a simple single-line format.
 

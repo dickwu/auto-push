@@ -22,6 +22,8 @@ pub struct HooksConfig {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HookCommand {
     pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     pub run: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub on_error: Option<String>,
@@ -415,12 +417,17 @@ pub fn show_config(repo_root: &Path) -> Result<()> {
             } else {
                 println!("[pre_push] {} command(s):", cfg.pre_push.len());
                 for (i, cmd) in cfg.pre_push.iter().enumerate() {
+                    let desc = cmd
+                        .description
+                        .as_deref()
+                        .map(|s| format!(" — {s}"))
+                        .unwrap_or_default();
                     let on_error = cmd
                         .on_error
                         .as_deref()
                         .map(|s| format!(" (on_error: {s})"))
                         .unwrap_or_default();
-                    println!("  {}) {} — {}{}", i + 1, cmd.name, cmd.run, on_error);
+                    println!("  {}) {}{}: {}{}", i + 1, cmd.name, desc, cmd.run, on_error);
                 }
             }
 
@@ -429,12 +436,17 @@ pub fn show_config(repo_root: &Path) -> Result<()> {
             } else {
                 println!("[after_push] {} command(s):", cfg.after_push.len());
                 for (i, cmd) in cfg.after_push.iter().enumerate() {
+                    let desc = cmd
+                        .description
+                        .as_deref()
+                        .map(|s| format!(" — {s}"))
+                        .unwrap_or_default();
                     let on_error = cmd
                         .on_error
                         .as_deref()
                         .map(|s| format!(" (on_error: {s})"))
                         .unwrap_or_default();
-                    println!("  {}) {} — {}{}", i + 1, cmd.name, cmd.run, on_error);
+                    println!("  {}) {}{}: {}{}", i + 1, cmd.name, desc, cmd.run, on_error);
                 }
             }
         }
@@ -450,16 +462,19 @@ pub fn default_pre_push_commands(repo_root: &Path) -> Vec<HookCommand> {
         vec![
             HookCommand {
                 name: "tests".into(),
+                description: Some("Run the project test suite".into()),
                 run: "cargo test".into(),
                 on_error: None,
             },
             HookCommand {
                 name: "lint".into(),
+                description: Some("Check for common mistakes and style issues".into()),
                 run: "cargo clippy -- -D warnings".into(),
                 on_error: None,
             },
             HookCommand {
                 name: "format check".into(),
+                description: Some("Verify code formatting matches rustfmt rules".into()),
                 run: "cargo fmt -- --check".into(),
                 on_error: None,
             },
@@ -468,11 +483,13 @@ pub fn default_pre_push_commands(repo_root: &Path) -> Vec<HookCommand> {
         vec![
             HookCommand {
                 name: "tests".into(),
+                description: Some("Run the project test suite".into()),
                 run: "npm test".into(),
                 on_error: None,
             },
             HookCommand {
                 name: "lint".into(),
+                description: Some("Check for common mistakes and style issues".into()),
                 run: "npm run lint".into(),
                 on_error: None,
             },
@@ -481,11 +498,13 @@ pub fn default_pre_push_commands(repo_root: &Path) -> Vec<HookCommand> {
         vec![
             HookCommand {
                 name: "tests".into(),
+                description: Some("Run the project test suite".into()),
                 run: "python -m pytest".into(),
                 on_error: None,
             },
             HookCommand {
                 name: "lint".into(),
+                description: Some("Check for common mistakes and style issues".into()),
                 run: "python -m ruff check .".into(),
                 on_error: None,
             },
@@ -494,11 +513,13 @@ pub fn default_pre_push_commands(repo_root: &Path) -> Vec<HookCommand> {
         vec![
             HookCommand {
                 name: "tests".into(),
+                description: Some("Run the project test suite".into()),
                 run: "go test ./...".into(),
                 on_error: None,
             },
             HookCommand {
                 name: "vet".into(),
+                description: Some("Check for suspicious constructs and potential bugs".into()),
                 run: "go vet ./...".into(),
                 on_error: None,
             },
@@ -506,6 +527,7 @@ pub fn default_pre_push_commands(repo_root: &Path) -> Vec<HookCommand> {
     } else {
         vec![HookCommand {
             name: "example".into(),
+            description: Some("Placeholder hook — replace with your own checks".into()),
             run: "echo 'Replace with your pre-push checks'".into(),
             on_error: None,
         }]
@@ -515,6 +537,7 @@ pub fn default_pre_push_commands(repo_root: &Path) -> Vec<HookCommand> {
 fn default_after_push_commands() -> Vec<HookCommand> {
     vec![HookCommand {
         name: "example".into(),
+        description: Some("Print a summary of the push".into()),
         run: "echo 'Pushed {{ branch }} ({{ commit_hash }})'".into(),
         on_error: None,
     }]
@@ -564,8 +587,8 @@ mod tests {
     fn test_load_config_valid() {
         let dir = tempfile::tempdir().unwrap();
         let json = r#"{
-            "pre_push": [{"name": "tests", "run": "cargo test"}],
-            "after_push": [{"name": "notify", "run": "echo done"}]
+            "pre_push": [{"name": "tests", "description": "Run tests", "run": "cargo test"}],
+            "after_push": [{"name": "notify", "description": "Send notification", "run": "echo done"}]
         }"#;
         fs::write(dir.path().join(".auto-push.json"), json).unwrap();
 
@@ -835,6 +858,7 @@ mod tests {
     fn test_run_phase_pre_push_success() {
         let config = simple_config(vec![HookCommand {
             name: "trivial".into(),
+            description: None,
             run: "true".into(),
             on_error: None,
         }]);
@@ -847,6 +871,7 @@ mod tests {
     fn test_run_phase_pre_push_failure_bails() {
         let config = simple_config(vec![HookCommand {
             name: "failing".into(),
+            description: None,
             run: "false".into(),
             on_error: None,
         }]);
@@ -865,11 +890,13 @@ mod tests {
         let config = after_config(vec![
             HookCommand {
                 name: "fail-first".into(),
+                description: None,
                 run: "false".into(),
                 on_error: None,
             },
             HookCommand {
                 name: "create-marker".into(),
+                description: None,
                 run: format!("touch {}", marker.display()),
                 on_error: None,
             },
@@ -885,6 +912,7 @@ mod tests {
     fn test_run_phase_captures_output() {
         let config = simple_config(vec![HookCommand {
             name: "greet".into(),
+            description: None,
             run: "echo hello".into(),
             on_error: None,
         }]);
@@ -898,6 +926,7 @@ mod tests {
     fn test_run_phase_template_substitution() {
         let config = simple_config(vec![HookCommand {
             name: "branch-check".into(),
+            description: None,
             run: "echo {{ branch }}".into(),
             on_error: None,
         }]);
@@ -914,11 +943,13 @@ mod tests {
             after_push: vec![
                 HookCommand {
                     name: "step1".into(),
+                    description: None,
                     run: "echo chain_value".into(),
                     on_error: None,
                 },
                 HookCommand {
                     name: "step2".into(),
+                    description: None,
                     run: "echo {{ command_output.step1 }}".into(),
                     on_error: None,
                 },
@@ -939,6 +970,7 @@ mod tests {
         let marker = dir.path().join("on_error_ran");
         let config = simple_config(vec![HookCommand {
             name: "fail".into(),
+            description: None,
             run: "false".into(),
             on_error: Some(format!("touch {}", marker.display())),
         }]);
@@ -951,6 +983,7 @@ mod tests {
     fn test_run_phase_dry_run_skips_execution() {
         let config = simple_config(vec![HookCommand {
             name: "would-fail".into(),
+            description: None,
             run: "false".into(),
             on_error: None,
         }]);
@@ -978,11 +1011,13 @@ mod tests {
         let config = simple_config(vec![
             HookCommand {
                 name: "fail-first".into(),
+                description: None,
                 run: "false".into(),
                 on_error: None,
             },
             HookCommand {
                 name: "should-not-run".into(),
+                description: None,
                 run: format!("touch {}", marker.display()),
                 on_error: None,
             },
