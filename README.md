@@ -110,6 +110,62 @@ auto-push --show-hooks
 
 Each command has a `name`, an optional `description`, a `run` string, and an optional `on_error` handler. Pre-push commands run sequentially — if any fails, the push is aborted. After-push commands continue even if one fails.
 
+#### Command fields
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `name` | string | yes | Unique identifier within the phase |
+| `description` | string | no | Human-readable summary (shown by `--show-hooks`) |
+| `run` | string | yes | Shell command to execute (supports template variables) |
+| `on_error` | string | no | Shell command to run if `run` fails |
+| `confirm` | string | no | Prompt the user for confirmation before running (supports templates) |
+| `interactive` | bool | no | Give the command full TTY access for stdin/stdout/stderr |
+
+### Confirmation prompts
+
+Add a `confirm` field to gate a command on user approval:
+
+```json
+{
+  "name": "deploy",
+  "confirm": "Deploy {{ branch }} to production?",
+  "run": "deploy.sh {{ branch }}"
+}
+```
+
+The confirm message supports the same `{{ variable }}` templates as `run`. Behavior:
+
+- **User declines a pre-push confirm** — push is aborted
+- **User declines an after-push confirm** — that command is skipped, remaining hooks continue
+- **`--force`** — all confirms are auto-accepted
+- **No TTY (CI)** — all confirms are auto-accepted (logged for auditability)
+- **`--dry-run`** — the confirm message is printed but no prompt is shown
+
+### Interactive commands
+
+Set `interactive` to give a command full terminal access (stdin, stdout, stderr inherited). Use this for tools that need user input during execution:
+
+```json
+{
+  "name": "select-target",
+  "run": "interactive-deploy-picker",
+  "interactive": true
+}
+```
+
+When `interactive` is true, the command's output is **not captured** — `{{ command_output.NAME }}` will be empty for that command. If no TTY is available (e.g. CI), the command falls back to piped mode with captured output.
+
+You can combine `confirm` and `interactive`:
+
+```json
+{
+  "name": "manual-deploy",
+  "confirm": "Run interactive deploy for {{ branch }}?",
+  "run": "deploy-wizard",
+  "interactive": true
+}
+```
+
 ### Template variables
 
 Commands support `{{ variable }}` substitution:

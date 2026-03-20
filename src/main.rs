@@ -165,6 +165,7 @@ fn main() -> Result<()> {
             config,
             &mut template_ctx,
             ctx.cli.dry_run,
+            ctx.cli.force,
         )?;
     }
 
@@ -194,6 +195,7 @@ fn main() -> Result<()> {
             config,
             &mut template_ctx,
             ctx.cli.dry_run,
+            ctx.cli.force,
         ) {
             eprintln!("[after_push] Warning: {e}");
         }

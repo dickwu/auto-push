@@ -2,6 +2,7 @@ use anyhow::{Context, Result, bail};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -27,6 +28,21 @@ pub struct HookCommand {
     pub run: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub on_error: Option<String>,
+    /// Optional confirmation prompt shown before running the command.
+    /// Supports `{{ variable }}` template substitution.
+    /// If the user declines: pre_push hooks abort the push, after_push hooks skip the command.
+    /// Auto-accepted when `--force` is set or no TTY is available (e.g. CI).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirm: Option<String>,
+    /// When true, the command gets full TTY passthrough (stdin/stdout/stderr inherited).
+    /// Output is NOT captured, so `{{ command_output.NAME }}` will be empty.
+    /// Falls back to piped mode when no TTY is available.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub interactive: bool,
+}
+
+fn is_false(v: &bool) -> bool {
+    !v
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -236,16 +252,32 @@ pub fn extract_regex(text: &str, pattern: &str) -> String {
 // Task 5: Command execution
 // ---------------------------------------------------------------------------
 
+/// Prompt the user with a yes/no question. Defaults to No.
+fn prompt_confirm(question: &str) -> Result<bool> {
+    use std::io::Write;
+
+    print!("{question} [y/N] ");
+    std::io::stdout().flush()?;
+
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
+
+    let answer = input.trim().to_lowercase();
+    Ok(answer == "y" || answer == "yes")
+}
+
 /// Run all commands for the given phase.
 ///
 /// - `PrePush`: bail on the first failure (after running `on_error` if set).
 /// - `AfterPush`: warn on failure but continue running remaining commands.
 /// - `dry_run`: print the resolved command without executing it.
+/// - `force`: auto-accept all `confirm` prompts without asking.
 pub fn run_phase(
     phase: HookPhase,
     config: &HooksConfig,
     template_ctx: &mut TemplateContext,
     dry_run: bool,
+    force: bool,
 ) -> Result<()> {
     let commands = match phase {
         HookPhase::PrePush => &config.pre_push,
@@ -267,11 +299,46 @@ pub fn run_phase(
         println!("[{label}] [{step}/{total}] {}...", cmd.name);
 
         if dry_run {
+            if let Some(ref confirm_tmpl) = cmd.confirm {
+                let resolved =
+                    render_template(confirm_tmpl, template_ctx, &cmd.name, &cmd.run, phase);
+                println!("[{label}] [dry-run] Would confirm: {resolved}");
+            }
             println!("[{label}] [dry-run] Would run: {resolved_run}");
+            if cmd.interactive {
+                println!("[{label}] [dry-run] (interactive mode)");
+            }
             continue;
         }
 
-        let (output, success) = execute_command(&resolved_run)?;
+        // Handle confirm prompt
+        if let Some(ref confirm_tmpl) = cmd.confirm {
+            let resolved = render_template(confirm_tmpl, template_ctx, &cmd.name, &cmd.run, phase);
+
+            if force {
+                println!("[{label}] [{step}/{total}] Confirm auto-accepted (--force): {resolved}");
+            } else if !std::io::stdin().is_terminal() {
+                println!("[{label}] [{step}/{total}] Confirm auto-accepted (no TTY): {resolved}");
+            } else if !prompt_confirm(&resolved)? {
+                match phase {
+                    HookPhase::PrePush => {
+                        bail!(
+                            "{label} hook '{}' was not confirmed. Push aborted.",
+                            cmd.name
+                        );
+                    }
+                    HookPhase::AfterPush => {
+                        println!(
+                            "[{label}] [{step}/{total}] {} skipped (not confirmed)",
+                            cmd.name
+                        );
+                        continue;
+                    }
+                }
+            }
+        }
+
+        let (output, success) = execute_command(&resolved_run, cmd.interactive)?;
 
         // Store output keyed by name for chaining
         template_ctx
@@ -286,7 +353,7 @@ pub fn run_phase(
                 let resolved_on_error =
                     render_template(on_error_tmpl, template_ctx, &cmd.name, &cmd.run, phase);
                 println!("[{label}] [on_error] Running: {resolved_on_error}");
-                let _ = execute_command(&resolved_on_error);
+                let _ = execute_command(&resolved_on_error, false);
             }
 
             match phase {
@@ -320,11 +387,29 @@ pub fn run_phase(
 /// Execute a shell command, streaming output to the terminal in real-time
 /// while also capturing it for template variable chaining.
 ///
+/// When `interactive` is true and a TTY is available, the command gets full
+/// stdin/stdout/stderr passthrough (no output capture). Falls back to piped
+/// mode when no TTY is detected (e.g. CI).
+///
 /// Returns `(combined_output, success)`.
-fn execute_command(cmd: &str) -> Result<(String, bool)> {
+fn execute_command(cmd: &str, interactive: bool) -> Result<(String, bool)> {
     use std::io::{BufRead, BufReader};
     use std::process::{Command, Stdio};
     use std::thread;
+
+    // Interactive mode: inherit all stdio for full TTY passthrough.
+    // Output is not captured (returns empty string).
+    if interactive && std::io::stdin().is_terminal() {
+        let status = Command::new("sh")
+            .args(["-c", cmd])
+            .status()
+            .with_context(|| format!("failed to run: {}", cmd))?;
+        return Ok((String::new(), status.success()));
+    }
+
+    if interactive {
+        eprintln!("[hooks] Note: interactive mode unavailable (no TTY); capturing output instead");
+    }
 
     let mut child = Command::new("sh")
         .args(["-c", cmd])
@@ -405,6 +490,39 @@ pub fn init_config(repo_root: &Path) -> Result<()> {
     Ok(())
 }
 
+fn format_command(i: usize, cmd: &HookCommand) -> String {
+    let desc = cmd
+        .description
+        .as_deref()
+        .map(|s| format!(" — {s}"))
+        .unwrap_or_default();
+    let on_error = cmd
+        .on_error
+        .as_deref()
+        .map(|s| format!(" (on_error: {s})"))
+        .unwrap_or_default();
+    let confirm_info = cmd
+        .confirm
+        .as_deref()
+        .map(|s| format!(" [confirm: {s}]"))
+        .unwrap_or_default();
+    let interactive_info = if cmd.interactive {
+        " [interactive]"
+    } else {
+        ""
+    };
+    format!(
+        "  {}) {}{}: {}{}{}{}",
+        i + 1,
+        cmd.name,
+        desc,
+        cmd.run,
+        on_error,
+        confirm_info,
+        interactive_info
+    )
+}
+
 pub fn show_config(repo_root: &Path) -> Result<()> {
     let config = load_config(repo_root)?;
     match config {
@@ -417,17 +535,7 @@ pub fn show_config(repo_root: &Path) -> Result<()> {
             } else {
                 println!("[pre_push] {} command(s):", cfg.pre_push.len());
                 for (i, cmd) in cfg.pre_push.iter().enumerate() {
-                    let desc = cmd
-                        .description
-                        .as_deref()
-                        .map(|s| format!(" — {s}"))
-                        .unwrap_or_default();
-                    let on_error = cmd
-                        .on_error
-                        .as_deref()
-                        .map(|s| format!(" (on_error: {s})"))
-                        .unwrap_or_default();
-                    println!("  {}) {}{}: {}{}", i + 1, cmd.name, desc, cmd.run, on_error);
+                    println!("{}", format_command(i, cmd));
                 }
             }
 
@@ -436,17 +544,7 @@ pub fn show_config(repo_root: &Path) -> Result<()> {
             } else {
                 println!("[after_push] {} command(s):", cfg.after_push.len());
                 for (i, cmd) in cfg.after_push.iter().enumerate() {
-                    let desc = cmd
-                        .description
-                        .as_deref()
-                        .map(|s| format!(" — {s}"))
-                        .unwrap_or_default();
-                    let on_error = cmd
-                        .on_error
-                        .as_deref()
-                        .map(|s| format!(" (on_error: {s})"))
-                        .unwrap_or_default();
-                    println!("  {}) {}{}: {}{}", i + 1, cmd.name, desc, cmd.run, on_error);
+                    println!("{}", format_command(i, cmd));
                 }
             }
         }
@@ -465,18 +563,24 @@ pub fn default_pre_push_commands(repo_root: &Path) -> Vec<HookCommand> {
                 description: Some("Run the project test suite".into()),
                 run: "cargo test".into(),
                 on_error: None,
+                confirm: None,
+                interactive: false,
             },
             HookCommand {
                 name: "lint".into(),
                 description: Some("Check for common mistakes and style issues".into()),
                 run: "cargo clippy -- -D warnings".into(),
                 on_error: None,
+                confirm: None,
+                interactive: false,
             },
             HookCommand {
                 name: "format check".into(),
                 description: Some("Verify code formatting matches rustfmt rules".into()),
                 run: "cargo fmt -- --check".into(),
                 on_error: None,
+                confirm: None,
+                interactive: false,
             },
         ]
     } else if repo_root.join("package.json").exists() {
@@ -486,12 +590,16 @@ pub fn default_pre_push_commands(repo_root: &Path) -> Vec<HookCommand> {
                 description: Some("Run the project test suite".into()),
                 run: "npm test".into(),
                 on_error: None,
+                confirm: None,
+                interactive: false,
             },
             HookCommand {
                 name: "lint".into(),
                 description: Some("Check for common mistakes and style issues".into()),
                 run: "npm run lint".into(),
                 on_error: None,
+                confirm: None,
+                interactive: false,
             },
         ]
     } else if repo_root.join("pyproject.toml").exists() || repo_root.join("setup.py").exists() {
@@ -501,12 +609,16 @@ pub fn default_pre_push_commands(repo_root: &Path) -> Vec<HookCommand> {
                 description: Some("Run the project test suite".into()),
                 run: "python -m pytest".into(),
                 on_error: None,
+                confirm: None,
+                interactive: false,
             },
             HookCommand {
                 name: "lint".into(),
                 description: Some("Check for common mistakes and style issues".into()),
                 run: "python -m ruff check .".into(),
                 on_error: None,
+                confirm: None,
+                interactive: false,
             },
         ]
     } else if repo_root.join("go.mod").exists() {
@@ -516,12 +628,16 @@ pub fn default_pre_push_commands(repo_root: &Path) -> Vec<HookCommand> {
                 description: Some("Run the project test suite".into()),
                 run: "go test ./...".into(),
                 on_error: None,
+                confirm: None,
+                interactive: false,
             },
             HookCommand {
                 name: "vet".into(),
                 description: Some("Check for suspicious constructs and potential bugs".into()),
                 run: "go vet ./...".into(),
                 on_error: None,
+                confirm: None,
+                interactive: false,
             },
         ]
     } else {
@@ -530,6 +646,8 @@ pub fn default_pre_push_commands(repo_root: &Path) -> Vec<HookCommand> {
             description: Some("Placeholder hook — replace with your own checks".into()),
             run: "echo 'Replace with your pre-push checks'".into(),
             on_error: None,
+            confirm: None,
+            interactive: false,
         }]
     }
 }
@@ -540,6 +658,8 @@ fn default_after_push_commands() -> Vec<HookCommand> {
         description: Some("Print a summary of the push".into()),
         run: "echo 'Pushed {{ branch }} ({{ commit_hash }})'".into(),
         on_error: None,
+        confirm: None,
+        interactive: false,
     }]
 }
 
@@ -840,6 +960,17 @@ mod tests {
     // Execution tests
     // -----------------------------------------------------------------------
 
+    fn cmd(name: &str, run: &str) -> HookCommand {
+        HookCommand {
+            name: name.into(),
+            description: None,
+            run: run.into(),
+            on_error: None,
+            confirm: None,
+            interactive: false,
+        }
+    }
+
     fn simple_config(commands: Vec<HookCommand>) -> HooksConfig {
         HooksConfig {
             pre_push: commands,
@@ -856,27 +987,17 @@ mod tests {
 
     #[test]
     fn test_run_phase_pre_push_success() {
-        let config = simple_config(vec![HookCommand {
-            name: "trivial".into(),
-            description: None,
-            run: "true".into(),
-            on_error: None,
-        }]);
+        let config = simple_config(vec![cmd("trivial", "true")]);
         let mut ctx = make_ctx();
-        let result = run_phase(HookPhase::PrePush, &config, &mut ctx, false);
+        let result = run_phase(HookPhase::PrePush, &config, &mut ctx, false, false);
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_run_phase_pre_push_failure_bails() {
-        let config = simple_config(vec![HookCommand {
-            name: "failing".into(),
-            description: None,
-            run: "false".into(),
-            on_error: None,
-        }]);
+        let config = simple_config(vec![cmd("failing", "false")]);
         let mut ctx = make_ctx();
-        let result = run_phase(HookPhase::PrePush, &config, &mut ctx, false);
+        let result = run_phase(HookPhase::PrePush, &config, &mut ctx, false, false);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("failing"));
@@ -888,50 +1009,30 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let marker = dir.path().join("marker");
         let config = after_config(vec![
-            HookCommand {
-                name: "fail-first".into(),
-                description: None,
-                run: "false".into(),
-                on_error: None,
-            },
-            HookCommand {
-                name: "create-marker".into(),
-                description: None,
-                run: format!("touch {}", marker.display()),
-                on_error: None,
-            },
+            cmd("fail-first", "false"),
+            cmd("create-marker", &format!("touch {}", marker.display())),
         ]);
         let mut ctx = make_ctx();
         // Should NOT bail — after_push continues on failure
-        let result = run_phase(HookPhase::AfterPush, &config, &mut ctx, false);
+        let result = run_phase(HookPhase::AfterPush, &config, &mut ctx, false, false);
         assert!(result.is_ok(), "after_push should not bail on failure");
         assert!(marker.exists(), "second command should still have run");
     }
 
     #[test]
     fn test_run_phase_captures_output() {
-        let config = simple_config(vec![HookCommand {
-            name: "greet".into(),
-            description: None,
-            run: "echo hello".into(),
-            on_error: None,
-        }]);
+        let config = simple_config(vec![cmd("greet", "echo hello")]);
         let mut ctx = make_ctx();
-        run_phase(HookPhase::PrePush, &config, &mut ctx, false).unwrap();
+        run_phase(HookPhase::PrePush, &config, &mut ctx, false, false).unwrap();
         let captured = ctx.command_outputs.get("greet").unwrap();
         assert!(captured.contains("hello"));
     }
 
     #[test]
     fn test_run_phase_template_substitution() {
-        let config = simple_config(vec![HookCommand {
-            name: "branch-check".into(),
-            description: None,
-            run: "echo {{ branch }}".into(),
-            on_error: None,
-        }]);
+        let config = simple_config(vec![cmd("branch-check", "echo {{ branch }}")]);
         let mut ctx = make_ctx();
-        run_phase(HookPhase::PrePush, &config, &mut ctx, false).unwrap();
+        run_phase(HookPhase::PrePush, &config, &mut ctx, false, false).unwrap();
         let captured = ctx.command_outputs.get("branch-check").unwrap();
         assert!(captured.contains("main"));
     }
@@ -941,22 +1042,12 @@ mod tests {
         let config = HooksConfig {
             pre_push: vec![],
             after_push: vec![
-                HookCommand {
-                    name: "step1".into(),
-                    description: None,
-                    run: "echo chain_value".into(),
-                    on_error: None,
-                },
-                HookCommand {
-                    name: "step2".into(),
-                    description: None,
-                    run: "echo {{ command_output.step1 }}".into(),
-                    on_error: None,
-                },
+                cmd("step1", "echo chain_value"),
+                cmd("step2", "echo {{ command_output.step1 }}"),
             ],
         };
         let mut ctx = make_ctx();
-        run_phase(HookPhase::AfterPush, &config, &mut ctx, false).unwrap();
+        run_phase(HookPhase::AfterPush, &config, &mut ctx, false, false).unwrap();
         let step2_out = ctx.command_outputs.get("step2").unwrap();
         assert!(
             step2_out.contains("chain_value"),
@@ -969,27 +1060,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let marker = dir.path().join("on_error_ran");
         let config = simple_config(vec![HookCommand {
-            name: "fail".into(),
-            description: None,
-            run: "false".into(),
             on_error: Some(format!("touch {}", marker.display())),
+            ..cmd("fail", "false")
         }]);
         let mut ctx = make_ctx();
-        let _ = run_phase(HookPhase::PrePush, &config, &mut ctx, false);
+        let _ = run_phase(HookPhase::PrePush, &config, &mut ctx, false, false);
         assert!(marker.exists(), "on_error command should have run");
     }
 
     #[test]
     fn test_run_phase_dry_run_skips_execution() {
-        let config = simple_config(vec![HookCommand {
-            name: "would-fail".into(),
-            description: None,
-            run: "false".into(),
-            on_error: None,
-        }]);
+        let config = simple_config(vec![cmd("would-fail", "false")]);
         let mut ctx = make_ctx();
         // Should succeed because dry_run never executes
-        let result = run_phase(HookPhase::PrePush, &config, &mut ctx, true);
+        let result = run_phase(HookPhase::PrePush, &config, &mut ctx, true, false);
         assert!(result.is_ok());
     }
 
@@ -1000,8 +1084,8 @@ mod tests {
             after_push: vec![],
         };
         let mut ctx = make_ctx();
-        assert!(run_phase(HookPhase::PrePush, &config, &mut ctx, false).is_ok());
-        assert!(run_phase(HookPhase::AfterPush, &config, &mut ctx, false).is_ok());
+        assert!(run_phase(HookPhase::PrePush, &config, &mut ctx, false, false).is_ok());
+        assert!(run_phase(HookPhase::AfterPush, &config, &mut ctx, false, false).is_ok());
     }
 
     #[test]
@@ -1009,23 +1093,144 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let marker = dir.path().join("should_not_exist");
         let config = simple_config(vec![
-            HookCommand {
-                name: "fail-first".into(),
-                description: None,
-                run: "false".into(),
-                on_error: None,
-            },
-            HookCommand {
-                name: "should-not-run".into(),
-                description: None,
-                run: format!("touch {}", marker.display()),
-                on_error: None,
-            },
+            cmd("fail-first", "false"),
+            cmd("should-not-run", &format!("touch {}", marker.display())),
         ]);
         let mut ctx = make_ctx();
-        let result = run_phase(HookPhase::PrePush, &config, &mut ctx, false);
+        let result = run_phase(HookPhase::PrePush, &config, &mut ctx, false, false);
         assert!(result.is_err());
         assert!(!marker.exists(), "second command should not have run");
+    }
+
+    // -----------------------------------------------------------------------
+    // Confirm / interactive tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_confirm_field_deserializes() {
+        let dir = tempfile::tempdir().unwrap();
+        let json = r#"{
+            "pre_push": [{
+                "name": "deploy",
+                "run": "deploy.sh",
+                "confirm": "Deploy to production?"
+            }]
+        }"#;
+        fs::write(dir.path().join(".auto-push.json"), json).unwrap();
+
+        let config = load_config(dir.path()).unwrap().unwrap();
+        assert_eq!(
+            config.pre_push[0].confirm.as_deref(),
+            Some("Deploy to production?")
+        );
+        assert!(!config.pre_push[0].interactive);
+    }
+
+    #[test]
+    fn test_interactive_field_deserializes() {
+        let dir = tempfile::tempdir().unwrap();
+        let json = r#"{
+            "pre_push": [{
+                "name": "login",
+                "run": "auth-tool",
+                "interactive": true
+            }]
+        }"#;
+        fs::write(dir.path().join(".auto-push.json"), json).unwrap();
+
+        let config = load_config(dir.path()).unwrap().unwrap();
+        assert!(config.pre_push[0].interactive);
+        assert!(config.pre_push[0].confirm.is_none());
+    }
+
+    #[test]
+    fn test_interactive_defaults_to_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let json = r#"{"pre_push": [{"name": "t", "run": "true"}]}"#;
+        fs::write(dir.path().join(".auto-push.json"), json).unwrap();
+
+        let config = load_config(dir.path()).unwrap().unwrap();
+        assert!(!config.pre_push[0].interactive);
+    }
+
+    #[test]
+    fn test_confirm_force_auto_accepts() {
+        // With force=true, confirm is auto-accepted and the command runs
+        let config = simple_config(vec![HookCommand {
+            confirm: Some("Are you sure?".into()),
+            ..cmd("guarded", "true")
+        }]);
+        let mut ctx = make_ctx();
+        let result = run_phase(HookPhase::PrePush, &config, &mut ctx, false, true);
+        assert!(result.is_ok());
+        assert!(ctx.command_outputs.contains_key("guarded"));
+    }
+
+    #[test]
+    fn test_confirm_no_tty_auto_accepts() {
+        // In test runner (no TTY), confirm is auto-accepted
+        let config = simple_config(vec![HookCommand {
+            confirm: Some("Continue?".into()),
+            ..cmd("gated", "echo ran")
+        }]);
+        let mut ctx = make_ctx();
+        let result = run_phase(HookPhase::PrePush, &config, &mut ctx, false, false);
+        assert!(result.is_ok());
+        let output = ctx.command_outputs.get("gated").unwrap();
+        assert!(output.contains("ran"));
+    }
+
+    #[test]
+    fn test_interactive_command_falls_back_in_no_tty() {
+        // In test runner (no TTY), interactive falls back to piped mode
+        let config = simple_config(vec![HookCommand {
+            interactive: true,
+            ..cmd("interactive-echo", "echo interactive_output")
+        }]);
+        let mut ctx = make_ctx();
+        let result = run_phase(HookPhase::PrePush, &config, &mut ctx, false, false);
+        assert!(result.is_ok());
+        // In piped fallback mode, output IS captured
+        let output = ctx.command_outputs.get("interactive-echo").unwrap();
+        assert!(output.contains("interactive_output"));
+    }
+
+    #[test]
+    fn test_dry_run_shows_confirm_and_interactive() {
+        let config = simple_config(vec![HookCommand {
+            confirm: Some("Deploy?".into()),
+            interactive: true,
+            ..cmd("deploy", "deploy.sh")
+        }]);
+        let mut ctx = make_ctx();
+        // dry_run should succeed without executing or prompting
+        let result = run_phase(HookPhase::PrePush, &config, &mut ctx, true, false);
+        assert!(result.is_ok());
+        // No output captured in dry-run
+        assert!(!ctx.command_outputs.contains_key("deploy"));
+    }
+
+    #[test]
+    fn test_confirm_serialization_skips_defaults() {
+        let hook = cmd("test", "true");
+        let json = serde_json::to_string(&hook).unwrap();
+        assert!(!json.contains("confirm"), "confirm: None should be omitted");
+        assert!(
+            !json.contains("interactive"),
+            "interactive: false should be omitted"
+        );
+    }
+
+    #[test]
+    fn test_confirm_serialization_includes_values() {
+        let hook = HookCommand {
+            confirm: Some("Sure?".into()),
+            interactive: true,
+            ..cmd("test", "true")
+        };
+        let json = serde_json::to_string(&hook).unwrap();
+        assert!(json.contains("\"confirm\":\"Sure?\""));
+        assert!(json.contains("\"interactive\":true"));
     }
 
     // -----------------------------------------------------------------------

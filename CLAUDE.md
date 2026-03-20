@@ -28,7 +28,7 @@ Rust binary crate with these modules:
 - `src/main.rs` — Entry point, CLI arg parsing (`clap` derive), orchestration flow
 - `src/git.rs` — Git operations via `std::process::Command`, push via `gh` with `git push` fallback
 - `src/claude.rs` — Invokes local `claude -p` CLI with diff to generate commit messages; uses simple prompt for clean pulls, detailed prompt when merge occurred
-- `src/hooks.rs` — Unified hook system: pre_push/after_push commands via `.auto-push.json`, template engine with `{{ var }}` substitution and regex extraction, output chaining between commands, per-command `on_error` handlers
+- `src/hooks.rs` — Unified hook system: pre_push/after_push commands via `.auto-push.json`, template engine with `{{ var }}` substitution and regex extraction, output chaining between commands, per-command `on_error` handlers, `confirm` prompts (auto-accepted with `--force` or no TTY), and `interactive` mode for full TTY passthrough
 - `src/context.rs` — CLI flags and runtime context
 - `src/push.rs` — Push logic with retry, protected branch detection, Claude-assisted error recovery
 - `src/pull.rs` — Pull with rebase support and conflict detection
