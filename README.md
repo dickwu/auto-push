@@ -175,6 +175,7 @@ Commands support `{{ variable }}` substitution:
 | `{{ branch }}` | Current branch name |
 | `{{ remote }}` | Remote name (e.g. `origin`) |
 | `{{ commit_hash }}` | HEAD commit hash |
+| `{{ commit_summary }}` | Subject line of the latest commit (after-push only) |
 | `{{ command_name }}` | Name of the current command |
 | `{{ command_output.NAME }}` | Stdout of a previously run command |
 | `{{ command_output.NAME \| /regex/ }}` | Regex extraction from a command's output |
@@ -189,16 +190,58 @@ auto-push --no-after-push   # Skip after-push hooks only
 
 ## How it works
 
-1. Auto-stash dirty working tree (if needed)
-2. `git pull` to sync with remote (with rebase if `--rebase`)
-3. Sync submodules (if present)
-4. Unstash changes
-5. Run pre-push hooks (if `.auto-push.json` exists)
-6. `git add -A` to stage everything
-7. Get the diff and send it to Claude CLI for commit message generation
-8. `git commit` with the generated message
-9. Push via `gh` (falls back to `git push`)
-10. Run after-push hooks
+```
+         ┌─────────────┐
+         │  auto-push   │
+         └──────┬───────┘
+                │
+         ┌──────▼───────┐
+      1. │  Auto-stash   │  protect dirty working tree
+         └──────┬───────┘
+                │
+         ┌──────▼───────┐
+      2. │  git pull      │  sync with remote (--rebase optional)
+         └──────┬───────┘
+                │
+         ┌──────▼───────┐
+      3. │  Submodule     │  sync .gitmodules
+         │  sync          │
+         └──────┬───────┘
+                │
+         ┌──────▼───────┐
+      4. │  Unstash       │  restore local changes
+         └──────┬───────┘
+                │
+         ┌──────▼───────┐     ┌─────────────────┐
+      5. │  Pre-push      │────▶  .auto-push.json  │
+         │  hooks         │◀────  (confirm, etc.)  │
+         └──────┬───────┘     └─────────────────┘
+                │  bail on failure
+         ┌──────▼───────┐
+      6. │  git add -A    │  stage all changes
+         └──────┬───────┘
+                │
+         ┌──────▼───────┐     ┌─────────────────┐
+      7. │  Get diff &    │────▶  claude -p        │
+         │  generate msg  │◀────  (local CLI)      │
+         └──────┬───────┘     └─────────────────┘
+                │  commit_summary ──┐
+         ┌──────▼───────┐          │
+      8. │  git commit    │          │
+         └──────┬───────┘          │
+                │                   │
+         ┌──────▼───────┐          │
+      9. │  Push via gh   │  fallback to git push
+         └──────┬───────┘          │
+                │                   │
+         ┌──────▼───────┐          │
+     10. │  After-push    │◀────────┘
+         │  hooks         │  {{ commit_summary }} available
+         └──────┬───────┘
+                │
+                ▼
+             Done
+```
 
 If the pull required a merge, Claude uses a more detailed prompt to describe the merge context. For clean pulls, it uses a simple single-line format.
 

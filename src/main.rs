@@ -158,6 +158,7 @@ fn main() -> Result<()> {
                 eprintln!("[hooks] Warning: could not resolve HEAD commit hash");
                 String::new()
             }),
+            commit_summary: String::new(), // not yet committed
             command_outputs: std::collections::HashMap::new(),
         };
         hooks::run_phase(
@@ -186,6 +187,10 @@ fn main() -> Result<()> {
             remote: ctx.preflight.remote.clone(),
             commit_hash: git::run_git(&["rev-parse", "HEAD"]).unwrap_or_else(|_| {
                 eprintln!("[hooks] Warning: could not resolve HEAD commit hash");
+                String::new()
+            }),
+            commit_summary: git::run_git(&["log", "-1", "--format=%s"]).unwrap_or_else(|_| {
+                eprintln!("[hooks] Warning: could not resolve commit summary");
                 String::new()
             }),
             command_outputs: std::collections::HashMap::new(),

@@ -64,6 +64,7 @@ pub struct TemplateContext {
     pub branch: String,
     pub remote: String,
     pub commit_hash: String,
+    pub commit_summary: String,
     pub command_outputs: HashMap<String, String>,
 }
 
@@ -178,6 +179,7 @@ fn resolve_expression(
         "branch" => Some(sanitize_template_value(&ctx.branch)),
         "remote" => Some(sanitize_template_value(&ctx.remote)),
         "commit_hash" => Some(sanitize_template_value(&ctx.commit_hash)),
+        "commit_summary" => Some(sanitize_template_value(&ctx.commit_summary)),
         "command_name" => Some(sanitize_template_value(command_name)),
         "command_run" => Some(sanitize_template_value(command_run)),
         "command_type" => Some(phase.label().to_string()),
@@ -679,6 +681,7 @@ mod tests {
             branch: "main".into(),
             remote: "origin".into(),
             commit_hash: "abc1234".into(),
+            commit_summary: "feat: add new feature".into(),
             command_outputs: HashMap::new(),
         }
     }
@@ -850,6 +853,19 @@ mod tests {
             HookPhase::PrePush,
         );
         assert_eq!(out, "push main to origin at abc1234");
+    }
+
+    #[test]
+    fn test_render_template_commit_summary() {
+        let ctx = make_ctx();
+        let out = render_template(
+            "just pushed: {{ commit_summary }}",
+            &ctx,
+            "cmd",
+            "run",
+            HookPhase::AfterPush,
+        );
+        assert_eq!(out, "just pushed: feat: add new feature");
     }
 
     #[test]
