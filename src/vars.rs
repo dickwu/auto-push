@@ -3,6 +3,7 @@ use crate::template;
 use anyhow::{Result, bail};
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::process::Command;
 
 /// All built-in variable names that auto-push provides.
 /// These cannot be overridden by user vars or captures.
@@ -263,6 +264,197 @@ fn validate_capture_name(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Git-mutating command detection
+// ---------------------------------------------------------------------------
+
+/// Check if a command modifies git state (staging, commits, stash, pull, checkout).
+pub fn is_git_mutating(cmd: &str) -> bool {
+    const PATTERNS: &[&str] = &[
+        "git add",
+        "git commit",
+        "git stash",
+        "git pull",
+        "git checkout",
+        "git reset",
+        "git merge",
+        "git rebase",
+        "git rm",
+    ];
+    PATTERNS.iter().any(|p| cmd.contains(p))
+}
+
+// ---------------------------------------------------------------------------
+// Dynamic built-in variables
+// ---------------------------------------------------------------------------
+
+/// Returns true if `name` is a dynamic built-in (lazily computed from git state).
+fn is_dynamic_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "diff" | "diff_stat" | "hunks" | "staged_files" | "staged_count"
+    )
+}
+
+/// Names of all dynamic built-in variables.
+const DYNAMIC_BUILTINS: &[&str] = &["diff", "diff_stat", "hunks", "staged_files", "staged_count"];
+
+fn run_git_capture(args: &[&str]) -> Option<String> {
+    Command::new("git")
+        .args(args)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+}
+
+fn truncate(s: &str, max_bytes: usize) -> String {
+    if s.len() > max_bytes {
+        format!(
+            "{}\n\n... (diff truncated, {} bytes total)",
+            &s[..max_bytes],
+            s.len()
+        )
+    } else {
+        s.to_string()
+    }
+}
+
+/// Lazy resolver for dynamic built-in variables.
+/// Computes values on first access, caches them, and invalidates when git state changes.
+pub struct LazyVarResolver {
+    cache: HashMap<String, String>,
+    max_diff_bytes: usize,
+    dirty: bool,
+}
+
+#[allow(dead_code)] // main.rs integration in Task 9; used by run_pipeline
+impl LazyVarResolver {
+    pub fn new(max_diff_bytes: usize) -> Self {
+        Self {
+            cache: HashMap::new(),
+            max_diff_bytes,
+            dirty: true,
+        }
+    }
+
+    /// Invalidate the cache (called after git-mutating commands).
+    pub fn invalidate(&mut self) {
+        self.cache.clear();
+        self.dirty = true;
+    }
+
+    /// Get a dynamic var value. Computes and caches on first access.
+    /// Returns `None` if `name` is not a dynamic built-in.
+    pub fn get(&mut self, name: &str) -> Option<String> {
+        if !is_dynamic_builtin(name) {
+            return None;
+        }
+
+        if self.dirty || !self.cache.contains_key(name) {
+            if self.dirty {
+                self.cache.clear();
+                self.dirty = false;
+            }
+            if let Some(val) = self.compute(name) {
+                self.cache.insert(name.to_string(), val);
+            }
+        }
+
+        self.cache.get(name).cloned()
+    }
+
+    /// Return the list of all dynamic built-in variable names.
+    pub fn dynamic_names() -> &'static [&'static str] {
+        DYNAMIC_BUILTINS
+    }
+
+    fn compute(&self, name: &str) -> Option<String> {
+        match name {
+            "diff" => self.compute_diff(),
+            "diff_stat" => self.compute_diff_stat(),
+            "staged_files" => self.compute_staged_files(),
+            "staged_count" => self.compute_staged_count(),
+            "hunks" => self.compute_hunks(),
+            _ => None,
+        }
+    }
+
+    fn compute_diff(&self) -> Option<String> {
+        run_git_capture(&["diff", "--cached"]).map(|d| truncate(&d, self.max_diff_bytes))
+    }
+
+    fn compute_diff_stat(&self) -> Option<String> {
+        run_git_capture(&["diff", "--cached", "--stat"])
+    }
+
+    fn compute_staged_files(&self) -> Option<String> {
+        run_git_capture(&["diff", "--cached", "--name-only"])
+    }
+
+    fn compute_staged_count(&self) -> Option<String> {
+        self.compute_staged_files().map(|files| {
+            files
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .count()
+                .to_string()
+        })
+    }
+
+    fn compute_hunks(&self) -> Option<String> {
+        // Use diff module's hunk parsing if available; for now return the raw diff
+        self.compute_diff()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Static built-in variable construction
+// ---------------------------------------------------------------------------
+
+/// Build static built-in vars from preflight results and config.
+#[allow(dead_code)] // main.rs integration in Task 9
+pub fn build_static_vars(
+    branch: &str,
+    remote: &str,
+    remote_url: &str,
+    repo_root: &str,
+    generate_config: &crate::config::GenerateConfig,
+) -> HashMap<String, String> {
+    let mut vars = HashMap::new();
+    vars.insert("branch".into(), branch.to_string());
+    vars.insert("remote".into(), remote.to_string());
+    vars.insert("remote_url".into(), remote_url.to_string());
+    vars.insert("repo_root".into(), repo_root.to_string());
+    vars.insert(
+        "max_diff_bytes".into(),
+        generate_config.max_diff_bytes.to_string(),
+    );
+    vars.insert(
+        "style_suffix".into(),
+        crate::config::style_suffix(&generate_config.commit_style),
+    );
+
+    // System prompts from generate metadata
+    vars.insert(
+        "system_prompt".into(),
+        crate::generate::build_system_prompt(generate_config, false),
+    );
+    vars.insert(
+        "system_prompt_detailed".into(),
+        crate::generate::build_system_prompt(generate_config, true),
+    );
+    // push_fix_prompt and conflict_resolve_prompt from custom prompts
+    if let Some(ref p) = generate_config.prompts.push_fix {
+        vars.insert("push_fix_prompt".into(), p.clone());
+    }
+    if let Some(ref p) = generate_config.prompts.conflict_resolve {
+        vars.insert("conflict_resolve_prompt".into(), p.clone());
+    }
+
+    vars
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -414,5 +606,91 @@ mod tests {
         vars.insert("123bad".to_string(), "val".to_string());
         let err = validate_var_registry(&[], &vars).unwrap_err();
         assert!(err.to_string().contains("Invalid variable name"));
+    }
+
+    // -------------------------------------------------------------------
+    // is_git_mutating tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_is_git_mutating() {
+        assert!(is_git_mutating("git add -A"));
+        assert!(is_git_mutating("git commit -m 'msg'"));
+        assert!(is_git_mutating("git stash pop"));
+        assert!(is_git_mutating("git pull"));
+        assert!(is_git_mutating("git checkout main"));
+        assert!(is_git_mutating("git reset --hard HEAD"));
+        assert!(is_git_mutating("git merge feature"));
+        assert!(is_git_mutating("git rebase main"));
+        assert!(is_git_mutating("git rm file.txt"));
+        assert!(!is_git_mutating("cargo test"));
+        assert!(!is_git_mutating("echo hello"));
+        assert!(!is_git_mutating("git status"));
+        assert!(!is_git_mutating("git diff"));
+        assert!(!is_git_mutating("git log"));
+    }
+
+    // -------------------------------------------------------------------
+    // is_dynamic_builtin tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_is_dynamic_builtin() {
+        assert!(is_dynamic_builtin("diff"));
+        assert!(is_dynamic_builtin("diff_stat"));
+        assert!(is_dynamic_builtin("hunks"));
+        assert!(is_dynamic_builtin("staged_files"));
+        assert!(is_dynamic_builtin("staged_count"));
+        assert!(!is_dynamic_builtin("branch"));
+        assert!(!is_dynamic_builtin("system_prompt"));
+        assert!(!is_dynamic_builtin("remote"));
+    }
+
+    // -------------------------------------------------------------------
+    // LazyVarResolver tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_lazy_resolver_invalidation() {
+        let mut resolver = LazyVarResolver::new(20_000);
+        // Seed the resolver with known state
+        resolver.dirty = false;
+        resolver.cache.insert("diff".into(), "old".into());
+        resolver.invalidate();
+        assert!(resolver.dirty);
+        assert!(resolver.cache.is_empty());
+    }
+
+    #[test]
+    fn test_lazy_resolver_non_dynamic_returns_none() {
+        let mut resolver = LazyVarResolver::new(20_000);
+        assert!(resolver.get("branch").is_none());
+        assert!(resolver.get("system_prompt").is_none());
+        assert!(resolver.get("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_lazy_resolver_dynamic_names() {
+        let names = LazyVarResolver::dynamic_names();
+        assert!(names.contains(&"diff"));
+        assert!(names.contains(&"diff_stat"));
+        assert!(names.contains(&"hunks"));
+        assert!(names.contains(&"staged_files"));
+        assert!(names.contains(&"staged_count"));
+    }
+
+    #[test]
+    fn test_truncate_no_op() {
+        let s = "short";
+        assert_eq!(truncate(s, 100), "short");
+    }
+
+    #[test]
+    fn test_truncate_truncates() {
+        let s = "hello world, this is a long string";
+        let result = truncate(s, 5);
+        assert!(result.starts_with("hello"));
+        assert!(result.contains("... (diff truncated,"));
+        assert!(result.contains("bytes total)"));
     }
 }

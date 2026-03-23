@@ -1,5 +1,6 @@
 use crate::config::{self, CaptureMode, PipelineCommand};
 use crate::template;
+use crate::vars;
 use anyhow::{Context, Result, bail};
 use std::collections::HashMap;
 use std::io::IsTerminal;
@@ -424,6 +425,7 @@ fn execute_argv(command: &str, args: &[String], interactive: bool) -> Result<(St
 /// This is the unified replacement for `run_phase()`. It uses `HashMap<String, String>`
 /// for template variables (instead of the old `TemplateContext`).
 ///
+/// - `lazy_resolver`: resolver for dynamic built-in vars (diff, staged_files, etc.)
 /// - `skip_names`: command names to skip (from `--skip`)
 /// - `dry_run`: print resolved commands without executing
 /// - `force`: auto-accept all confirm prompts
@@ -432,6 +434,7 @@ fn execute_argv(command: &str, args: &[String], interactive: bool) -> Result<(St
 pub fn run_pipeline(
     commands: &[PipelineCommand],
     template_vars: &mut HashMap<String, String>,
+    lazy_resolver: &mut vars::LazyVarResolver,
     skip_names: &[String],
     dry_run: bool,
     force: bool,
@@ -460,6 +463,13 @@ pub fn run_pipeline(
         {
             println!("[pipeline] [{step}/{total}] {desc} skipped ('{capture_name}' already set)");
             continue;
+        }
+
+        // Populate dynamic vars on demand before template resolution
+        for dynamic_name in vars::LazyVarResolver::dynamic_names() {
+            if let Some(val) = lazy_resolver.get(dynamic_name) {
+                template_vars.insert(dynamic_name.to_string(), val);
+            }
         }
 
         // 3. Template resolution
@@ -496,6 +506,13 @@ pub fn run_pipeline(
 
         // 6. Execute
         let (output, success) = execute_pipeline_command(cmd, template_vars)?;
+
+        // After execution: invalidate lazy cache if the command mutates git state
+        if let Some(ref run_str) = cmd.run
+            && vars::is_git_mutating(run_str)
+        {
+            lazy_resolver.invalidate();
+        }
 
         if success {
             // 7. Capture: store trimmed stdout into template_vars
@@ -729,6 +746,10 @@ mod tests {
     // run_pipeline tests
     // -----------------------------------------------------------------------
 
+    fn make_lazy() -> vars::LazyVarResolver {
+        vars::LazyVarResolver::new(20_000)
+    }
+
     #[test]
     fn test_run_pipeline_basic() {
         let commands = vec![PipelineCommand {
@@ -738,7 +759,8 @@ mod tests {
         }];
         let mut vars = HashMap::new();
         vars.insert("branch".into(), "main".into());
-        let result = run_pipeline(&commands, &mut vars, &[], false, false, false);
+        let mut lazy = make_lazy();
+        let result = run_pipeline(&commands, &mut vars, &mut lazy, &[], false, false, false);
         assert!(result.is_ok());
     }
 
@@ -758,7 +780,8 @@ mod tests {
             },
         ];
         let mut vars = HashMap::new();
-        let result = run_pipeline(&commands, &mut vars, &[], false, false, false);
+        let mut lazy = make_lazy();
+        let result = run_pipeline(&commands, &mut vars, &mut lazy, &[], false, false, false);
         assert!(result.is_ok());
         assert_eq!(vars.get("msg").unwrap(), "world");
     }
@@ -778,9 +801,11 @@ mod tests {
             },
         ];
         let mut vars = HashMap::new();
+        let mut lazy = make_lazy();
         let result = run_pipeline(
             &commands,
             &mut vars,
+            &mut lazy,
             &["skip_me".to_string()],
             false,
             false,
@@ -806,7 +831,8 @@ mod tests {
         ];
         let mut vars = HashMap::new();
         vars.insert("commit_message".to_string(), "manual msg".to_string());
-        let result = run_pipeline(&commands, &mut vars, &[], false, false, false);
+        let mut lazy = make_lazy();
+        let result = run_pipeline(&commands, &mut vars, &mut lazy, &[], false, false, false);
         assert!(result.is_ok());
     }
 
@@ -818,7 +844,8 @@ mod tests {
             ..Default::default()
         }];
         let mut vars = HashMap::new();
-        let result = run_pipeline(&commands, &mut vars, &[], true, false, false);
+        let mut lazy = make_lazy();
+        let result = run_pipeline(&commands, &mut vars, &mut lazy, &[], true, false, false);
         assert!(result.is_ok());
     }
 
@@ -840,7 +867,8 @@ mod tests {
             ..Default::default()
         }];
         let mut vars = HashMap::new();
-        let result = run_pipeline(&commands, &mut vars, &[], false, false, false);
+        let mut lazy = make_lazy();
+        let result = run_pipeline(&commands, &mut vars, &mut lazy, &[], false, false, false);
         assert!(result.is_ok());
         assert_eq!(vars.get("var_a").unwrap(), "alpha");
         assert_eq!(vars.get("var_b").unwrap(), "beta");
@@ -855,7 +883,8 @@ mod tests {
             ..Default::default()
         }];
         let mut vars = HashMap::new();
-        let result = run_pipeline(&commands, &mut vars, &[], false, false, false);
+        let mut lazy = make_lazy();
+        let result = run_pipeline(&commands, &mut vars, &mut lazy, &[], false, false, false);
         // Should still fail (on_error runs but pipeline still bails)
         assert!(result.is_err());
     }
@@ -869,7 +898,8 @@ mod tests {
             ..Default::default()
         }];
         let mut vars = HashMap::new();
-        let result = run_pipeline(&commands, &mut vars, &[], false, false, false);
+        let mut lazy = make_lazy();
+        let result = run_pipeline(&commands, &mut vars, &mut lazy, &[], false, false, false);
         assert!(result.is_ok());
     }
 
@@ -883,7 +913,8 @@ mod tests {
             ..Default::default()
         }];
         let mut vars = HashMap::new();
-        let result = run_pipeline(&commands, &mut vars, &[], false, false, false);
+        let mut lazy = make_lazy();
+        let result = run_pipeline(&commands, &mut vars, &mut lazy, &[], false, false, false);
         assert!(result.is_ok());
         assert_eq!(vars.get("my_var").unwrap(), "captured_value");
     }
@@ -891,7 +922,8 @@ mod tests {
     #[test]
     fn test_run_pipeline_empty() {
         let mut vars = HashMap::new();
-        let result = run_pipeline(&[], &mut vars, &[], false, false, false);
+        let mut lazy = make_lazy();
+        let result = run_pipeline(&[], &mut vars, &mut lazy, &[], false, false, false);
         assert!(result.is_ok());
     }
 

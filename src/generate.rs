@@ -211,6 +211,28 @@ fn resolve_system_prompt(
     }
 }
 
+/// Build a system prompt from the generate config for use as a template variable.
+///
+/// When `detailed` is false, returns the simple commit message prompt (with style suffix).
+/// When `detailed` is true, returns the detailed/merge commit prompt (with style suffix).
+pub fn build_system_prompt(gen_config: &GenerateConfig, detailed: bool) -> String {
+    if detailed {
+        resolve_system_prompt(
+            DETAILED_SYSTEM_PROMPT_BASE,
+            gen_config.prompts.detailed.as_deref(),
+            gen_config,
+            true,
+        )
+    } else {
+        resolve_system_prompt(
+            SIMPLE_SYSTEM_PROMPT_BASE,
+            gen_config.prompts.simple.as_deref(),
+            gen_config,
+            true,
+        )
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
