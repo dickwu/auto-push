@@ -1,6 +1,5 @@
 mod config;
 mod context;
-mod diff;
 mod generate;
 mod git;
 mod pipeline;

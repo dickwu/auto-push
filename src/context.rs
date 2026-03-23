@@ -1,4 +1,3 @@
-use crate::config::AppConfig;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -8,22 +7,29 @@ pub struct PreflightResult {
     pub remote: String,
     #[allow(dead_code)]
     pub is_shallow: bool,
+    #[allow(dead_code)]
     pub has_submodules: bool,
+    #[allow(dead_code)]
     pub submodule_paths: Vec<String>,
     #[allow(dead_code)]
     pub has_lfs: bool,
+    #[allow(dead_code)]
     pub has_upstream: bool,
 }
 
 #[derive(Clone)]
 pub struct CliFlags {
+    #[allow(dead_code)]
     pub stage_all: bool,
     pub no_push: bool,
     pub no_pull: bool,
     pub no_stash: bool,
     pub no_submodules: bool,
+    #[allow(dead_code)]
     pub no_pre_push: bool,
+    #[allow(dead_code)]
     pub no_after_push: bool,
+    #[allow(dead_code)]
     pub no_hooks: bool,
     pub no_generate: bool,
     pub confirm: bool,
@@ -35,12 +41,6 @@ pub struct CliFlags {
     pub provider_override: Option<String>,
     pub skip: Vec<String>,
     pub var_overrides: Vec<(String, String)>,
-}
-
-pub struct Context {
-    pub preflight: PreflightResult,
-    pub cli: CliFlags,
-    pub app_config: AppConfig,
 }
 
 /// Map deprecated boolean flags to --skip entries and print warnings.
@@ -120,38 +120,16 @@ mod tests {
     }
 
     #[test]
-    fn test_context_construction() {
-        let ctx = Context {
-            preflight: dummy_preflight(),
-            cli: dummy_cli(),
-            app_config: AppConfig::default(),
-        };
-        assert_eq!(ctx.preflight.branch, "main");
-        assert!(ctx.cli.stage_all);
-        assert!(!ctx.cli.rebase);
+    fn test_preflight_result_construction() {
+        let p = dummy_preflight();
+        assert_eq!(p.branch, "main");
     }
 
     #[test]
-    fn test_cli_flags_has_hook_fields() {
-        let cli = CliFlags {
-            stage_all: true,
-            no_push: false,
-            no_pull: false,
-            no_stash: false,
-            no_submodules: false,
-            no_pre_push: false,
-            no_after_push: false,
-            no_hooks: false,
-            no_generate: false,
-            confirm: false,
-            dry_run: false,
-            message: None,
-            force: false,
-            rebase: false,
-            provider_override: None,
-            skip: vec![],
-            var_overrides: vec![],
-        };
+    fn test_cli_flags_construction() {
+        let cli = dummy_cli();
+        assert!(cli.stage_all);
+        assert!(!cli.rebase);
         assert!(!cli.no_after_push);
         assert!(!cli.no_hooks);
     }

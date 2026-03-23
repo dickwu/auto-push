@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use globset::GlobBuilder;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -135,10 +135,6 @@ fn is_false(v: &bool) -> bool {
 // Defaults
 // ---------------------------------------------------------------------------
 
-fn default_provider() -> ProviderConfig {
-    ProviderConfig::Preset("claude".into())
-}
-
 fn default_format() -> String {
     "conventional".into()
 }
@@ -199,69 +195,6 @@ impl Default for AppConfig {
             after_push: Vec::new(),
             branches: serde_json::Map::new(),
         }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Provider presets
-// ---------------------------------------------------------------------------
-
-pub struct ResolvedProvider {
-    pub command: String,
-    pub args: Vec<String>,
-    pub model: Option<String>,
-    pub structured_output: bool,
-}
-
-pub fn resolve_provider(config: &GenerateConfig) -> Result<ResolvedProvider> {
-    let explicit_structured = config.structured_output;
-    let default_preset = default_provider();
-    let provider = config.provider.as_ref().unwrap_or(&default_preset);
-
-    match provider {
-        ProviderConfig::Preset(name) => match name.as_str() {
-            "claude" => Ok(ResolvedProvider {
-                command: "claude".into(),
-                args: vec![
-                    "-p".into(),
-                    "{{ prompt }}".into(),
-                    "--system-prompt".into(),
-                    "{{ system_prompt }}".into(),
-                ],
-                model: None,
-                structured_output: explicit_structured.unwrap_or(true),
-            }),
-            "codex" => Ok(ResolvedProvider {
-                command: "codex".into(),
-                args: vec!["--quiet".into(), "--prompt".into(), "{{ prompt }}".into()],
-                model: None,
-                structured_output: explicit_structured.unwrap_or(false),
-            }),
-            "ollama" => Ok(ResolvedProvider {
-                command: "ollama".into(),
-                args: vec!["run".into(), "{{ model }}".into(), "{{ prompt }}".into()],
-                model: None,
-                structured_output: explicit_structured.unwrap_or(false),
-            }),
-            other => bail!(
-                "unknown provider preset: '{other}'. Use 'claude', 'codex', 'ollama', or a custom provider object."
-            ),
-        },
-        ProviderConfig::Custom(custom) => Ok(ResolvedProvider {
-            command: custom.command.clone(),
-            args: custom.args.clone(),
-            model: custom.model.clone(),
-            structured_output: explicit_structured.unwrap_or(false),
-        }),
-    }
-}
-
-/// Check if the resolved provider is Claude (needed for Claude-only features).
-pub fn is_claude_provider(config: &GenerateConfig) -> bool {
-    match &config.provider {
-        None => true, // Default provider is claude
-        Some(ProviderConfig::Preset(name)) => name == "claude",
-        Some(ProviderConfig::Custom(c)) => c.command == "claude",
     }
 }
 
@@ -414,43 +347,126 @@ fn apply_branch_overrides(merged: &mut serde_json::Value, branch: &str) -> Resul
 
 fn auto_init(repo_root: &Path) -> Result<()> {
     let path = config_path(repo_root);
-
-    // Detect provider
     let provider = detect_provider();
-
-    // Detect project type for hooks
-    let pre_push = detect_pre_push_hooks(repo_root);
+    let project_commands = detect_project_commands(repo_root);
 
     let mut config = serde_json::Map::new();
 
-    // Only write provider if detected
-    if let Some(prov) = provider {
-        let mut generate_obj = serde_json::Map::new();
-        generate_obj.insert("provider".into(), serde_json::Value::String(prov.clone()));
-        config.insert("generate".into(), serde_json::Value::Object(generate_obj));
-        println!("[config] Auto-detected provider: {prov}");
-    } else {
-        eprintln!(
-            "[config] Warning: no AI CLI detected. Install claude, codex, or ollama, \
-             or configure a custom provider in .auto-push.json."
-        );
+    // Build pipeline array
+    let mut pipeline = Vec::new();
+
+    // Stash + Pull + Unstash
+    pipeline.push(serde_json::json!({
+        "name": "stash",
+        "run": "git stash push -m 'auto-push auto-stash' || true",
+        "description": "Stash uncommitted changes"
+    }));
+    pipeline.push(serde_json::json!({
+        "name": "pull",
+        "run": "git pull",
+        "description": "Pull latest changes"
+    }));
+    pipeline.push(serde_json::json!({
+        "name": "unstash",
+        "run": "git stash pop || true",
+        "description": "Restore stashed changes"
+    }));
+
+    // Project-specific commands (tests, lint, fmt)
+    for cmd in &project_commands {
+        pipeline.push(serde_json::to_value(cmd).context("failed to serialize project command")?);
     }
 
-    config.insert(
-        "pre_push".into(),
-        serde_json::to_value(&pre_push).context("failed to serialize pre_push")?,
-    );
-    config.insert("after_push".into(), serde_json::Value::Array(vec![]));
+    // Stage
+    pipeline.push(serde_json::json!({
+        "name": "stage",
+        "run": "git add -A",
+        "description": "Stage all changes"
+    }));
 
+    // Generate (provider-specific, argv mode)
+    if let Some(ref prov) = provider {
+        let gen_cmd = match prov.as_str() {
+            "claude" => serde_json::json!({
+                "name": "generate",
+                "command": "claude",
+                "args": [
+                    "-p",
+                    "Generate a commit message for this diff:\n\n{{ diff }}",
+                    "--system-prompt", "{{ system_prompt }}",
+                    "--output-format", "text",
+                    "--no-session-persistence",
+                    "--tools", ""
+                ],
+                "capture": "commit_message",
+                "description": "Generate commit message with AI"
+            }),
+            "codex" => serde_json::json!({
+                "name": "generate",
+                "command": "codex",
+                "args": [
+                    "exec", "--color", "never",
+                    "{{ system_prompt }}\n\nGenerate a commit message for this diff:\n\n{{ diff }}"
+                ],
+                "capture": "commit_message",
+                "description": "Generate commit message with AI"
+            }),
+            "ollama" => serde_json::json!({
+                "name": "generate",
+                "command": "ollama",
+                "args": [
+                    "run", "llama3",
+                    "{{ system_prompt }}\n\nGenerate a commit message for this diff:\n\n{{ diff }}"
+                ],
+                "capture": "commit_message",
+                "description": "Generate commit message with AI"
+            }),
+            _ => serde_json::json!({
+                "name": "generate",
+                "run": "echo 'No AI provider detected. Install claude, codex, or ollama.'",
+                "capture": "commit_message",
+                "description": "Generate commit message with AI (PLACEHOLDER)"
+            }),
+        };
+        pipeline.push(gen_cmd);
+        println!("[config] Auto-detected provider: {prov}");
+    } else {
+        eprintln!("[config] Warning: no AI CLI detected. Install claude, codex, or ollama.");
+        pipeline.push(serde_json::json!({
+            "name": "generate",
+            "run": "echo 'Configure an AI provider in .auto-push.json'",
+            "capture": "commit_message"
+        }));
+    }
+
+    // Commit
+    pipeline.push(serde_json::json!({
+        "name": "commit",
+        "run": "git commit -m '{{ commit_message }}'",
+        "description": "Create commit",
+        "capture_after": [
+            {"name": "commit_hash", "run": "git rev-parse --short HEAD"},
+            {"name": "commit_summary", "run": "git log -1 --format=%s"}
+        ]
+    }));
+
+    // Push
+    pipeline.push(serde_json::json!({
+        "name": "push",
+        "run": "git push origin {{ branch }}",
+        "description": "Push to remote",
+        "on_error": "sleep 2 && git push origin {{ branch }}"
+    }));
+
+    config.insert("pipeline".into(), serde_json::Value::Array(pipeline));
+
+    // Write config
     let content =
         serde_json::to_string_pretty(&config).context("failed to serialize auto-init config")?;
-
     std::fs::write(&path, format!("{content}\n"))
         .with_context(|| format!("failed to write {}", path.display()))?;
 
-    // Update .gitignore
     update_gitignore(repo_root);
-
     println!("[config] Created {CONFIG_FILE}. Run `auto-push --show-config` to see full config.");
 
     Ok(())
@@ -474,7 +490,7 @@ fn command_exists(name: &str) -> bool {
         .is_ok()
 }
 
-fn detect_pre_push_hooks(repo_root: &Path) -> Vec<PipelineCommand> {
+fn detect_project_commands(repo_root: &Path) -> Vec<PipelineCommand> {
     if repo_root.join("Cargo.toml").exists() {
         vec![
             PipelineCommand {
@@ -849,73 +865,6 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_provider_claude() {
-        let config = GenerateConfig::default();
-        let resolved = resolve_provider(&config).unwrap();
-        assert_eq!(resolved.command, "claude");
-        assert!(resolved.structured_output);
-    }
-
-    #[test]
-    fn test_resolve_provider_codex() {
-        let config = GenerateConfig {
-            provider: Some(ProviderConfig::Preset("codex".into())),
-            ..Default::default()
-        };
-        let resolved = resolve_provider(&config).unwrap();
-        assert_eq!(resolved.command, "codex");
-        assert!(!resolved.structured_output);
-    }
-
-    #[test]
-    fn test_resolve_provider_unknown_preset() {
-        let config = GenerateConfig {
-            provider: Some(ProviderConfig::Preset("unknown".into())),
-            ..Default::default()
-        };
-        assert!(resolve_provider(&config).is_err());
-    }
-
-    #[test]
-    fn test_resolve_provider_custom() {
-        let config = GenerateConfig {
-            provider: Some(ProviderConfig::Custom(CustomProvider {
-                command: "my-tool".into(),
-                args: vec!["--input".into(), "{{ prompt }}".into()],
-                model: None,
-                description: None,
-            })),
-            ..Default::default()
-        };
-        let resolved = resolve_provider(&config).unwrap();
-        assert_eq!(resolved.command, "my-tool");
-        assert!(!resolved.structured_output);
-    }
-
-    #[test]
-    fn test_resolve_provider_explicit_structured_override() {
-        let config = GenerateConfig {
-            provider: Some(ProviderConfig::Preset("codex".into())),
-            structured_output: Some(true),
-            ..Default::default()
-        };
-        let resolved = resolve_provider(&config).unwrap();
-        assert!(resolved.structured_output);
-    }
-
-    #[test]
-    fn test_is_claude_provider() {
-        let claude_config = GenerateConfig::default();
-        assert!(is_claude_provider(&claude_config));
-
-        let codex_config = GenerateConfig {
-            provider: Some(ProviderConfig::Preset("codex".into())),
-            ..Default::default()
-        };
-        assert!(!is_claude_provider(&codex_config));
-    }
-
-    #[test]
     fn test_style_suffix() {
         let style = CommitStyle::default();
         let suffix = style_suffix(&style);
@@ -983,10 +932,8 @@ mod tests {
         let json = r#"{"pre_push": [{"name": "test", "run": "cargo test"}], "after_push": []}"#;
         let config: AppConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.pre_push.len(), 1);
-        // provider defaults to None; resolve_provider falls back to claude
+        // provider defaults to None
         assert!(config.generate.provider.is_none());
-        let resolved = resolve_provider(&config.generate).unwrap();
-        assert_eq!(resolved.command, "claude");
     }
 
     #[test]
@@ -1076,7 +1023,7 @@ mod tests {
     }
 
     #[test]
-    fn test_auto_init_creates_config() {
+    fn test_auto_init_creates_pipeline_config() {
         let dir = tempfile::tempdir().unwrap();
         // Create a Cargo.toml so it detects Rust project
         std::fs::write(dir.path().join("Cargo.toml"), "[package]").unwrap();
@@ -1088,7 +1035,21 @@ mod tests {
 
         let content = std::fs::read_to_string(&config_file).unwrap();
         let val: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert!(val["pre_push"].is_array());
+        assert!(val["pipeline"].is_array());
+        assert!(val.get("pre_push").is_none());
+        // Verify expected pipeline commands exist
+        let pipeline = val["pipeline"].as_array().unwrap();
+        let names: Vec<&str> = pipeline.iter().filter_map(|c| c["name"].as_str()).collect();
+        assert!(names.contains(&"stash"));
+        assert!(names.contains(&"pull"));
+        assert!(names.contains(&"unstash"));
+        assert!(names.contains(&"stage"));
+        assert!(names.contains(&"generate"));
+        assert!(names.contains(&"commit"));
+        assert!(names.contains(&"push"));
+        // Rust project should have tests + lint + format check
+        assert!(names.contains(&"tests"));
+        assert!(names.contains(&"lint"));
     }
 
     #[test]
@@ -1124,9 +1085,8 @@ mod tests {
 
         let config = load(dir.path(), "main").unwrap();
         assert_eq!(config.pre_push.len(), 1);
-        // Generate uses defaults; provider is None, resolve_provider falls back to claude
-        let resolved = resolve_provider(&config.generate).unwrap();
-        assert_eq!(resolved.command, "claude");
+        // Generate uses defaults; provider is None
+        assert!(config.generate.provider.is_none());
     }
 
     // -----------------------------------------------------------------------
