@@ -166,42 +166,86 @@ pub struct CustomPrompts {
 ```rust
 struct PipelineCommand {
     name: String,
-    run: String,
+    // Shell mode: template string passed to sh -c (simple commands, hooks)
+    run: Option<String>,
+    // Argv mode: command + args array, template vars interpolated per-element
+    // Values passed via Command::new().args() — no shell escaping needed
+    command: Option<String>,
+    args: Option<Vec<String>>,
     description: Option<String>,
     on_error: Option<String>,
     confirm: Option<String>,
     interactive: bool,
-    capture: Option<String>,                        // store stdout into named var
-    capture_after: Option<HashMap<String, String>>,  // run extra commands post-success, store results
+    capture: Option<String>,                         // store stdout into named var
+    capture_after: Option<Vec<CaptureAfterEntry>>,   // ordered list of post-success captures
+    capture_mode: Option<CaptureMode>,               // stdout (default) | stderr | both
+}
+
+struct CaptureAfterEntry {
+    name: String,   // var name to register
+    run: String,    // shell command to execute
+}
+
+enum CaptureMode {
+    Stdout,  // default — capture stdout only
+    Stderr,  // capture stderr only
+    Both,    // capture combined stdout+stderr (backward compat with old hooks)
 }
 ```
 
-`PipelineCommand` extends the existing `HookCommand` with `capture` and `capture_after`. The old `HookCommand` type is replaced by `PipelineCommand` everywhere.
+**Two execution modes:**
+
+1. **Shell mode** (`run` field): template string passed to `sh -c`. Template vars are shell-escaped via `render_shell`. Suitable for simple commands, git operations, and hook-style scripts.
+
+2. **Argv mode** (`command` + `args` fields): command and arguments passed directly via `Command::new(command).args(args)`. Template vars are interpolated raw (no shell escaping) since values are passed as discrete argv elements — no word-splitting risk. **This is the recommended mode for AI provider commands** where prompts contain newlines, quotes, and large diffs:
+
+```jsonc
+{
+  "name": "generate",
+  "command": "claude",
+  "args": ["-p", "{{ diff }}", "--system-prompt", "{{ system_prompt }}", "--output-format", "text", "--no-session-persistence", "--tools", ""],
+  "capture": "commit_message"
+}
+```
+
+Exactly one of `run` or `command` must be set (validated at config load time). The `args` field is only valid with `command`.
+
+**Removing the 4096-char truncation**: the current `sanitize_shell_value` truncates at 4096 chars. In argv mode, no truncation is applied — the full diff (up to `max_diff_bytes`) is passed as a single argument. In shell mode, the 4096 limit is raised to match `max_diff_bytes` to avoid silently discarding diff content.
+
+`PipelineCommand` replaces the old `HookCommand` type everywhere.
+
+**`capture_after` is an ordered `Vec`** (not `HashMap`) to ensure deterministic execution order and allow validation of template references within capture_after entries.
+
+**Validation**: `interactive: true` is rejected if `capture` or `capture_after` is also set (config load error), since interactive mode disables output capture.
 
 ## 4. Variable Registry
 
 ### Three sources of variables
 
-**Built-in vars** — auto-push always computes these from git state and config metadata. Cannot be overridden by user vars or captures.
+**Built-in vars** — auto-push provides these from git state and config metadata. Cannot be overridden by user vars or captures.
 
-| Variable | Source |
-|---|---|
-| `branch` | `git rev-parse --abbrev-ref HEAD` |
-| `remote` | detected default remote |
-| `remote_url` | `git remote get-url <remote>` |
-| `repo_root` | `git rev-parse --show-toplevel` |
-| `diff` | `git diff --cached`, truncated to `max_diff_bytes` |
-| `diff_stat` | `git diff --cached --stat` |
-| `hunks` | formatted numbered hunks for split planning |
-| `staged_files` | newline-separated list of staged file paths |
-| `staged_count` | number of staged files |
-| `style_suffix` | auto-derived from `generate.commit_style` |
-| `system_prompt` | resolved from `generate.prompts.simple` (or built-in default) + `style_suffix` |
-| `system_prompt_detailed` | same for merge commits |
-| `system_prompt_plan` | same for hunk planning |
-| `push_fix_prompt` | from `generate.prompts.push_fix` (or built-in default) |
-| `conflict_resolve_prompt` | from `generate.prompts.conflict_resolve` (or built-in default) |
-| `max_diff_bytes` | from `generate.max_diff_bytes` |
+Built-ins are split into **static** (computed once at preflight) and **dynamic** (recomputed on every reference via lazy resolver, since pipeline commands mutate git state):
+
+| Variable | Kind | Source |
+|---|---|---|
+| `branch` | static | `git rev-parse --abbrev-ref HEAD` |
+| `remote` | static | detected default remote |
+| `remote_url` | static | `git remote get-url <remote>` |
+| `repo_root` | static | `git rev-parse --show-toplevel` |
+| `diff` | **dynamic** | `git diff --cached`, truncated to `max_diff_bytes` |
+| `diff_stat` | **dynamic** | `git diff --cached --stat` |
+| `hunks` | **dynamic** | formatted numbered hunks for split planning |
+| `staged_files` | **dynamic** | `git diff --cached --name-only` |
+| `staged_count` | **dynamic** | count of staged files |
+| `style_suffix` | static | auto-derived from `generate.commit_style` |
+| `system_prompt` | static | resolved from `generate.prompts.simple` (or built-in default) + `style_suffix` |
+| `system_prompt_detailed` | static | same for merge commits |
+| `system_prompt_plan` | static | same for hunk planning |
+| `push_fix_prompt` | static | from `generate.prompts.push_fix` (or built-in default) |
+| `conflict_resolve_prompt` | static | from `generate.prompts.conflict_resolve` (or built-in default) |
+| `max_diff_bytes` | static | from `generate.max_diff_bytes` |
+
+**Lazy resolution**: dynamic vars are NOT precomputed at startup. When a command's template references `{{ diff }}`, the engine runs `git diff --cached` at that moment, captures the output, and caches it until the next command that modifies git state (any command whose `run` contains `git add`, `git commit`, `git stash`, `git pull`, or `git checkout`). After such a command, the cache is invalidated and the next reference triggers a fresh computation. This ensures vars like `{{ diff }}` always reflect the current git state, even after `pull`, `unstash`, or `stage` commands have run.
 
 **User vars** — declared in the `vars` config section. Names must not collide with built-ins.
 
@@ -285,8 +329,22 @@ VarName        = [a-zA-Z_][a-zA-Z0-9_]*
 DotPath        = "." Segment ( "." Segment )*
 Segment        = [a-zA-Z_][a-zA-Z0-9_]* | [0-9]+   (field name or array index)
 RegexExtract   = ":/" Pattern "/"
-Pattern        = valid Rust regex
+Pattern        = valid Rust regex (may contain } characters)
 ```
+
+### Template parser change (CRITICAL)
+
+The current template regex `\{\{\s*([^}]+?)\s*\}\}` (in `template.rs:7`) **cannot** be used for the new expression grammar because:
+1. Regex patterns inside `{{ var:/pattern/ }}` may contain `}` (e.g., `\d{7}`)
+2. The current `[^}]` character class would break on such patterns
+
+**New parser**: replace the single regex with a scanning parser:
+1. Scan for `{{`
+2. Track nesting: when inside `:/`, read until the closing `/` (regex body may contain `}`)
+3. After the optional regex, read until `}}`
+4. Extract the full expression between `{{ }}`
+
+This is implemented as a `fn scan_template_expressions(input: &str) -> Vec<(usize, usize, &str)>` that returns `(start, end, expression)` tuples. `render_shell` and `render_raw` use this scanner instead of the regex.
 
 ### Resolution logic
 
@@ -371,23 +429,12 @@ fn resolve_expression(expr: &str, vars: &HashMap<String, String>) -> Result<Stri
 
 ### Multi-commit splitting
 
-Convention: if `{{ commit_message }}` (or any var used in a `git commit -m` command) contains `---` on its own line as a separator, the engine splits into multiple commits:
+**Dropped from pipeline scope.** The convention-based `---` separator approach cannot produce multiple logical commits from one staged diff — the first `git commit` consumes all staged changes, leaving nothing for subsequent segments. This was identified by the Codex audit as a critical flaw.
 
-```
-feat: add login flow
----
-fix: correct email validation
-```
-
-Detection: when a command's resolved `run` matches the pattern `^git commit .+-m\s+` and the interpolated commit message contains `\n---\n`, the engine:
-1. Splits the message by `\n---\n`
-2. Trims each segment
-3. Filters out empty segments
-4. For each segment: runs `git add -A && git commit -m '<segment>'`
-   (re-stages between commits since earlier commits consume staged changes)
-5. Reports: `[pipeline] [6/8] commit: 2 commit(s) created`
-
-If no `---` separator, the command runs as-is (single commit). If the commit message happens to contain `---` in a markdown body (after a blank line), users can opt out by not using the `---` convention — the AI prompt controls the output format.
+Instead:
+- **Single commit is the default.** The generate command returns one commit message, one commit is created.
+- **Users who need multi-commit splitting** should use the current hunk-aware behavior via a dedicated helper. This can be delivered as a future built-in pipeline command (e.g., `auto-push-split-commit`) or an external script that orchestrates hunk-level staging via `git apply --cached`.
+- The `{{ hunks }}` built-in var is still available for users who want to build their own split logic.
 
 ### What stays hardcoded
 
@@ -396,7 +443,6 @@ If no `---` separator, the command runs as-is (single commit). If the commit mes
 | Preflight checks | Hardcoded in Rust | Safety — must validate git state before any commands |
 | Config loading | Hardcoded in Rust | Must parse config to know what pipeline to run |
 | Variable registry validation | Hardcoded in Rust | Catches errors before execution |
-| Multi-commit split detection | Hardcoded in Rust | Convention applied transparently |
 | Template rendering | Hardcoded in Rust | Core engine capability |
 
 Everything else — pull, stash, test, lint, stage, generate, commit, push, notify — moves to pipeline commands.
@@ -519,7 +565,9 @@ For users who want the full behavior of the old hardcoded pipeline:
     { "name": "unstash",  "run": "git stash pop || true" },
     { "name": "tests",    "run": "cargo test" },
     { "name": "stage",    "run": "git add -A" },
-    { "name": "generate", "run": "claude -p 'Generate a commit message:\n\n{{ diff }}' --system-prompt '{{ system_prompt }}' --output-format text --no-session-persistence --tools ''",
+    { "name": "generate",
+      "command": "claude",
+      "args": ["-p", "Generate a commit message:\n\n{{ diff }}", "--system-prompt", "{{ system_prompt }}", "--output-format", "text", "--no-session-persistence", "--tools", ""],
       "capture": "commit_message" },
     { "name": "commit",   "run": "git commit -m '{{ commit_message }}'",
       "capture_after": { "commit_hash": "git rev-parse --short HEAD", "commit_summary": "git log -1 --format=%s" } },
@@ -533,10 +581,21 @@ For users who want the full behavior of the old hardcoded pipeline:
 
 When `.auto-push.json` has `pre_push`/`after_push` arrays but no `pipeline`:
 
-1. Build a default pipeline: `[pull, stage, <pre_push commands>, generate, commit, push, <after_push commands>]`
-2. Map the old `generate.provider` to a shell command for the generate step
-3. Print deprecation warning: `[config] Migrated pre_push/after_push to pipeline. Update your .auto-push.json.`
-4. Execute the migrated pipeline
+**Migration order** (critical — branch overrides must be applied on the legacy shape first):
+
+1. Parse the raw JSON config (with `pre_push`, `after_push`, `generate.provider`, `branches`)
+2. Apply branch overrides on the legacy shape using `deep_merge` (preserves `branches.*.pre_push` etc.)
+3. After overrides are applied, migrate the fully merged legacy config to pipeline:
+   a. Build default pipeline: `[stash, pull, unstash, stage, <pre_push commands>, generate, commit, push, <after_push commands>]`
+   b. Map `generate.provider` to a shell command (or `command` + `args` for argv mode):
+      - `ProviderConfig::Preset("claude")` → argv mode with claude args
+      - `ProviderConfig::Preset("codex")` → argv mode with codex exec args
+      - `ProviderConfig::Custom { command, args, .. }` → argv mode preserving exact command + args
+   c. If `generate.timeout_secs > 0`, wrap the generate command with a timeout note in description
+   d. Migrated hooks get `capture_mode: Both` to preserve combined stdout+stderr behavior
+4. Print deprecation warning: `[config] Migrated pre_push/after_push to pipeline. Update your .auto-push.json.`
+5. If any legacy field cannot be exactly preserved (e.g., `structured_output` has no pipeline equivalent), print explicit warning: `[config] Warning: 'generate.structured_output' has no effect in pipeline mode.`
+6. Validate and execute the migrated pipeline
 
 The old `generate.provider` / `ProviderConfig::Preset` / `ProviderConfig::Custom` types are kept for parsing legacy configs only.
 
@@ -555,7 +614,7 @@ The old `generate.provider` / `ProviderConfig::Preset` / `ProviderConfig::Custom
 | `push.rs` | Remove. Push is a pipeline command. |
 | `pull.rs` | Remove. Pull is a pipeline command. |
 | `stash.rs` | Remove. Stash is a pipeline command. |
-| `stage_commit.rs` | Reduce to multi-commit split detection logic only. The staging and commit execution move to pipeline. |
+| `stage_commit.rs` | Remove. Staging and commit execution move to pipeline. Multi-commit splitting dropped from scope. |
 | `submodule.rs` | Remove or reduce. Submodule sync becomes a pipeline command. |
 
 ### Files added
