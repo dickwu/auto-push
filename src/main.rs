@@ -11,6 +11,7 @@ mod stage_commit;
 mod stash;
 mod submodule;
 mod template;
+mod vars;
 
 use anyhow::{Result, bail};
 use clap::Parser;

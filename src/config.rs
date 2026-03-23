@@ -345,6 +345,15 @@ pub fn load(repo_root: &Path, branch: &str) -> Result<AppConfig> {
     let config: AppConfig =
         serde_json::from_value(merged).context("failed to deserialize merged config")?;
 
+    // Validate variable registry (catches duplicates, forward refs, collisions)
+    if let Some(ref pipeline) = config.pipeline {
+        crate::vars::validate_var_registry(pipeline, &config.vars)?;
+    }
+    // Also validate legacy pre_push/after_push if no pipeline
+    if config.pipeline.is_none() && !config.pre_push.is_empty() {
+        crate::vars::validate_var_registry(&config.pre_push, &config.vars)?;
+    }
+
     Ok(config)
 }
 
