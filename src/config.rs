@@ -342,8 +342,17 @@ pub fn load(repo_root: &Path, branch: &str) -> Result<AppConfig> {
         obj.remove("branches");
     }
 
-    let config: AppConfig =
+    let mut config: AppConfig =
         serde_json::from_value(merged).context("failed to deserialize merged config")?;
+
+    // Migrate legacy pre_push/after_push to pipeline if no pipeline is set
+    if config.pipeline.is_none() && (!config.pre_push.is_empty() || !config.after_push.is_empty()) {
+        let migrated = migrate_to_pipeline(&config)?;
+        config = AppConfig {
+            pipeline: Some(migrated),
+            ..config
+        };
+    }
 
     // Validate variable registry (catches duplicates, forward refs, collisions)
     if let Some(ref pipeline) = config.pipeline {
@@ -554,6 +563,168 @@ fn update_gitignore(repo_root: &Path) {
     {
         eprintln!("[config] Warning: could not update .gitignore: {e}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Legacy config migration
+// ---------------------------------------------------------------------------
+
+/// Migrate legacy `pre_push`/`after_push` configs into a unified `pipeline` array.
+///
+/// Build order: stash, pull, unstash, stage, <pre_push>, generate, commit, push, <after_push>
+pub fn migrate_to_pipeline(config: &AppConfig) -> Result<Vec<PipelineCommand>> {
+    let mut pipeline = vec![
+        // Stash
+        PipelineCommand {
+            name: "stash".into(),
+            run: Some("git stash push -m 'auto-push auto-stash' || true".into()),
+            description: Some("Stash uncommitted changes".into()),
+            ..Default::default()
+        },
+        // Pull
+        PipelineCommand {
+            name: "pull".into(),
+            run: Some("git pull".into()),
+            description: Some("Pull latest changes".into()),
+            ..Default::default()
+        },
+        // Unstash
+        PipelineCommand {
+            name: "unstash".into(),
+            run: Some("git stash pop || true".into()),
+            description: Some("Restore stashed changes".into()),
+            ..Default::default()
+        },
+        // Stage
+        PipelineCommand {
+            name: "stage".into(),
+            run: Some("git add -A".into()),
+            description: Some("Stage all changes".into()),
+            ..Default::default()
+        },
+    ];
+
+    // Pre-push hooks (migrated with capture_mode: Both to preserve old behavior)
+    for cmd in &config.pre_push {
+        let migrated = PipelineCommand {
+            capture_mode: if cmd.capture_mode.is_none() {
+                Some(CaptureMode::Both)
+            } else {
+                cmd.capture_mode.clone()
+            },
+            ..cmd.clone()
+        };
+        pipeline.push(migrated);
+    }
+
+    // Generate (from provider config)
+    let gen_cmd = build_generate_command(&config.generate)?;
+    pipeline.push(gen_cmd);
+
+    // Commit
+    pipeline.push(PipelineCommand {
+        name: "commit".into(),
+        run: Some("git commit -m '{{ commit_message }}'".into()),
+        description: Some("Create commit".into()),
+        capture_after: Some(vec![
+            CaptureAfterEntry {
+                name: "commit_hash".into(),
+                run: "git rev-parse --short HEAD".into(),
+            },
+            CaptureAfterEntry {
+                name: "commit_summary".into(),
+                run: "git log -1 --format=%s".into(),
+            },
+        ]),
+        ..Default::default()
+    });
+
+    // Push
+    pipeline.push(PipelineCommand {
+        name: "push".into(),
+        run: Some("git push origin {{ branch }}".into()),
+        description: Some("Push to remote".into()),
+        on_error: Some("sleep 2 && git push origin {{ branch }}".into()),
+        ..Default::default()
+    });
+
+    // After-push hooks (migrated with capture_mode: Both to preserve old behavior)
+    for cmd in &config.after_push {
+        let migrated = PipelineCommand {
+            capture_mode: if cmd.capture_mode.is_none() {
+                Some(CaptureMode::Both)
+            } else {
+                cmd.capture_mode.clone()
+            },
+            ..cmd.clone()
+        };
+        pipeline.push(migrated);
+    }
+
+    eprintln!("[config] Migrated pre_push/after_push to pipeline format.");
+    eprintln!("[config] Update your .auto-push.json to use \"pipeline\" directly.");
+
+    Ok(pipeline)
+}
+
+fn build_generate_command(gen_config: &GenerateConfig) -> Result<PipelineCommand> {
+    let provider = gen_config.provider.as_ref();
+
+    let is_claude_default = provider.is_none();
+    let is_claude_preset = matches!(provider, Some(ProviderConfig::Preset(s)) if s == "claude");
+
+    let (command, args) = if is_claude_default || is_claude_preset {
+        (
+            "claude".to_string(),
+            vec![
+                "-p".into(),
+                "{{ diff }}".into(),
+                "--system-prompt".into(),
+                "{{ system_prompt }}".into(),
+                "--output-format".into(),
+                "text".into(),
+                "--no-session-persistence".into(),
+                "--tools".into(),
+                "".into(),
+            ],
+        )
+    } else {
+        match provider {
+            Some(ProviderConfig::Preset(s)) if s == "codex" => (
+                "codex".to_string(),
+                vec![
+                    "exec".into(),
+                    "--color".into(),
+                    "never".into(),
+                    "{{ system_prompt }}\n\nGenerate a commit message for this diff:\n\n{{ diff }}"
+                        .into(),
+                ],
+            ),
+            Some(ProviderConfig::Preset(s)) if s == "ollama" => (
+                "ollama".to_string(),
+                vec![
+                    "run".into(),
+                    "llama3".into(),
+                    "{{ system_prompt }}\n\nGenerate a commit message for this diff:\n\n{{ diff }}"
+                        .into(),
+                ],
+            ),
+            Some(ProviderConfig::Custom(c)) => (c.command.clone(), c.args.clone()),
+            Some(ProviderConfig::Preset(s)) => {
+                anyhow::bail!("Unknown provider preset: '{s}'");
+            }
+            None => unreachable!(), // handled above
+        }
+    };
+
+    Ok(PipelineCommand {
+        name: "generate".into(),
+        command: Some(command),
+        args: Some(args),
+        capture: Some("commit_message".into()),
+        description: Some("Generate commit message with AI".into()),
+        ..Default::default()
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1033,5 +1204,174 @@ mod tests {
         let json = r#"{"generate": {"provider": "claude"}, "pipeline": []}"#;
         let config: AppConfig = serde_json::from_str(json).unwrap();
         assert!(config.generate.provider.is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // Legacy config migration tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_migrate_legacy_config_basic() {
+        let json = r#"{
+            "generate": {"provider": "claude"},
+            "pre_push": [{"name": "test", "run": "cargo test"}],
+            "after_push": [{"name": "notify", "run": "echo done"}]
+        }"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        let pipeline = migrate_to_pipeline(&config).unwrap();
+        assert!(pipeline.iter().any(|c| c.name == "stash"));
+        assert!(pipeline.iter().any(|c| c.name == "pull"));
+        assert!(pipeline.iter().any(|c| c.name == "test"));
+        assert!(pipeline.iter().any(|c| c.name == "generate"));
+        assert!(pipeline.iter().any(|c| c.name == "commit"));
+        assert!(pipeline.iter().any(|c| c.name == "push"));
+        assert!(pipeline.iter().any(|c| c.name == "notify"));
+        // Generate uses argv mode
+        let gen_cmd = pipeline.iter().find(|c| c.name == "generate").unwrap();
+        assert!(gen_cmd.command.is_some());
+        assert_eq!(gen_cmd.capture.as_deref(), Some("commit_message"));
+        // Migrated hooks have capture_mode: Both
+        let test_cmd = pipeline.iter().find(|c| c.name == "test").unwrap();
+        assert!(matches!(test_cmd.capture_mode, Some(CaptureMode::Both)));
+    }
+
+    #[test]
+    fn test_migrate_custom_provider() {
+        let json = r#"{
+            "generate": {"provider": {"command": "my-ai", "args": ["--prompt", "{{ prompt }}"]}},
+            "pre_push": []
+        }"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        let pipeline = migrate_to_pipeline(&config).unwrap();
+        let gen_cmd = pipeline.iter().find(|c| c.name == "generate").unwrap();
+        assert_eq!(gen_cmd.command.as_deref(), Some("my-ai"));
+    }
+
+    #[test]
+    fn test_migrate_codex_provider() {
+        let json = r#"{"generate": {"provider": "codex"}, "pre_push": []}"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        let pipeline = migrate_to_pipeline(&config).unwrap();
+        let gen_cmd = pipeline.iter().find(|c| c.name == "generate").unwrap();
+        assert_eq!(gen_cmd.command.as_deref(), Some("codex"));
+        assert!(gen_cmd.args.as_ref().unwrap().contains(&"exec".to_string()));
+    }
+
+    #[test]
+    fn test_migrate_default_provider() {
+        let json = r#"{"pre_push": [{"name": "lint", "run": "cargo clippy"}]}"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        let pipeline = migrate_to_pipeline(&config).unwrap();
+        let gen_cmd = pipeline.iter().find(|c| c.name == "generate").unwrap();
+        assert_eq!(gen_cmd.command.as_deref(), Some("claude")); // default
+    }
+
+    #[test]
+    fn test_migrate_ordering() {
+        let json = r#"{
+            "pre_push": [{"name": "test", "run": "cargo test"}],
+            "after_push": [{"name": "notify", "run": "echo done"}]
+        }"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        let pipeline = migrate_to_pipeline(&config).unwrap();
+        let names: Vec<&str> = pipeline.iter().map(|c| c.name.as_str()).collect();
+        // stash, pull, unstash, stage come before pre_push
+        let stash_idx = names.iter().position(|n| *n == "stash").unwrap();
+        let test_idx = names.iter().position(|n| *n == "test").unwrap();
+        let gen_idx = names.iter().position(|n| *n == "generate").unwrap();
+        let notify_idx = names.iter().position(|n| *n == "notify").unwrap();
+        assert!(stash_idx < test_idx);
+        assert!(test_idx < gen_idx);
+        assert!(gen_idx < notify_idx);
+    }
+
+    #[test]
+    fn test_migrate_ollama_provider() {
+        let json = r#"{"generate": {"provider": "ollama"}, "pre_push": []}"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        let pipeline = migrate_to_pipeline(&config).unwrap();
+        let gen_cmd = pipeline.iter().find(|c| c.name == "generate").unwrap();
+        assert_eq!(gen_cmd.command.as_deref(), Some("ollama"));
+        assert!(gen_cmd.args.as_ref().unwrap().contains(&"run".to_string()));
+        assert!(
+            gen_cmd
+                .args
+                .as_ref()
+                .unwrap()
+                .contains(&"llama3".to_string())
+        );
+    }
+
+    #[test]
+    fn test_migrate_unknown_provider_fails() {
+        let json = r#"{"generate": {"provider": "unknown-tool"}, "pre_push": []}"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        let result = migrate_to_pipeline(&config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unknown provider"));
+    }
+
+    #[test]
+    fn test_migrate_commit_has_capture_after() {
+        let json = r#"{"pre_push": []}"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        let pipeline = migrate_to_pipeline(&config).unwrap();
+        let commit = pipeline.iter().find(|c| c.name == "commit").unwrap();
+        let ca = commit.capture_after.as_ref().unwrap();
+        assert_eq!(ca.len(), 2);
+        assert!(ca.iter().any(|e| e.name == "commit_hash"));
+        assert!(ca.iter().any(|e| e.name == "commit_summary"));
+    }
+
+    #[test]
+    fn test_migrate_push_has_on_error() {
+        let json = r#"{"pre_push": []}"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        let pipeline = migrate_to_pipeline(&config).unwrap();
+        let push = pipeline.iter().find(|c| c.name == "push").unwrap();
+        assert!(push.on_error.is_some());
+    }
+
+    #[test]
+    fn test_migrate_preserves_existing_capture_mode() {
+        let json = r#"{
+            "pre_push": [{"name": "test", "run": "cargo test", "capture_mode": "stdout"}],
+            "after_push": []
+        }"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        let pipeline = migrate_to_pipeline(&config).unwrap();
+        let test_cmd = pipeline.iter().find(|c| c.name == "test").unwrap();
+        assert!(matches!(test_cmd.capture_mode, Some(CaptureMode::Stdout)));
+    }
+
+    #[test]
+    fn test_migrate_load_wires_pipeline() {
+        let dir = tempfile::tempdir().unwrap();
+        let json = r#"{"pre_push": [{"name": "test", "run": "echo hi"}], "after_push": []}"#;
+        std::fs::write(dir.path().join(CONFIG_FILE), json).unwrap();
+
+        let config = load(dir.path(), "main").unwrap();
+        // Migration should have produced a pipeline
+        assert!(config.pipeline.is_some());
+        let pipeline = config.pipeline.unwrap();
+        assert!(pipeline.iter().any(|c| c.name == "stash"));
+        assert!(pipeline.iter().any(|c| c.name == "generate"));
+        assert!(pipeline.iter().any(|c| c.name == "test"));
+    }
+
+    #[test]
+    fn test_no_migrate_when_pipeline_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let json = r#"{
+            "pipeline": [{"name": "custom", "run": "echo hello"}],
+            "pre_push": [{"name": "test", "run": "cargo test"}]
+        }"#;
+        std::fs::write(dir.path().join(CONFIG_FILE), json).unwrap();
+
+        let config = load(dir.path(), "main").unwrap();
+        // Should NOT have migrated; pipeline stays as-is
+        let pipeline = config.pipeline.unwrap();
+        assert_eq!(pipeline.len(), 1);
+        assert_eq!(pipeline[0].name, "custom");
     }
 }
