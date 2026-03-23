@@ -1,15 +1,10 @@
+use anyhow::{Result, anyhow};
 use regex::Regex;
 use std::collections::HashMap;
-use std::sync::OnceLock;
-
-fn template_regex() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"\{\{\s*([^}]+?)\s*\}\}").expect("static regex"))
-}
 
 /// Sanitize a value before interpolating it into a shell command template.
 /// Trims whitespace, escapes shell metacharacters, normalises newlines,
-/// and truncates to 4096 chars.
+/// and truncates to 200_000 chars (large enough for most diffs).
 pub fn sanitize_shell_value(raw: &str) -> String {
     let trimmed = raw.trim();
     let no_cr = trimmed.replace("\r\n", "\n").replace('\r', "");
@@ -27,8 +22,8 @@ pub fn sanitize_shell_value(raw: &str) -> String {
 
     let normalised = escaped.replace('\n', "\\n");
 
-    if normalised.chars().count() > 4096 {
-        let truncated: String = normalised.chars().take(4096).collect();
+    if normalised.chars().count() > 200_000 {
+        let truncated: String = normalised.chars().take(200_000).collect();
         format!("{truncated}...(truncated)")
     } else {
         normalised
@@ -39,14 +34,22 @@ pub fn sanitize_shell_value(raw: &str) -> String {
 /// Values are shell-escaped to prevent injection.
 /// Unresolved `{{ var }}` patterns are left as-is.
 pub fn render_shell(template: &str, vars: &HashMap<String, String>) -> String {
-    let re = template_regex();
-    re.replace_all(template, |caps: &regex::Captures| {
-        let key = caps[1].trim();
-        vars.get(key)
-            .map(|v| sanitize_shell_value(v))
-            .unwrap_or_else(|| caps[0].to_string())
-    })
-    .into_owned()
+    let spans = scan_template_expressions(template);
+    if spans.is_empty() {
+        return template.to_string();
+    }
+    let mut result = String::with_capacity(template.len());
+    let mut last = 0;
+    for (start, end, expr) in spans {
+        result.push_str(&template[last..start]);
+        match resolve_expression(expr, vars) {
+            Ok(val) => result.push_str(&sanitize_shell_value(&val)),
+            Err(_) => result.push_str(&template[start..end]),
+        }
+        last = end;
+    }
+    result.push_str(&template[last..]);
+    result
 }
 
 /// Render a template string for use as process arguments.
@@ -54,17 +57,24 @@ pub fn render_shell(template: &str, vars: &HashMap<String, String>) -> String {
 /// passed directly via `Command::new().args()`, not through a shell.
 /// Unresolved `{{ var }}` patterns are left as-is.
 pub fn render_raw(template: &str, vars: &HashMap<String, String>) -> String {
-    let re = template_regex();
-    re.replace_all(template, |caps: &regex::Captures| {
-        let key = caps[1].trim();
-        vars.get(key)
-            .map(|v| v.trim().to_string())
-            .unwrap_or_else(|| caps[0].to_string())
-    })
-    .into_owned()
+    let spans = scan_template_expressions(template);
+    if spans.is_empty() {
+        return template.to_string();
+    }
+    let mut result = String::with_capacity(template.len());
+    let mut last = 0;
+    for (start, end, expr) in spans {
+        result.push_str(&template[last..start]);
+        match resolve_expression(expr, vars) {
+            Ok(val) => result.push_str(val.trim()),
+            Err(_) => result.push_str(&template[start..end]),
+        }
+        last = end;
+    }
+    result.push_str(&template[last..]);
+    result
 }
 
-#[allow(dead_code)]
 /// Apply a regex to `text`.  Returns:
 /// - the first capture group if present,
 /// - or the full match if no capture groups,
@@ -90,7 +100,83 @@ pub fn extract_regex(text: &str, pattern: &str) -> String {
     }
 }
 
-#[allow(dead_code)]
+/// Parse "var_name:/pattern/" into (var_name, pattern).
+fn parse_regex_expr(expr: &str) -> Option<(&str, &str)> {
+    let idx = expr.find(":/")?;
+    let var_name = &expr[..idx];
+    let rest = &expr[idx + 2..];
+    let pattern = rest.strip_suffix('/')?;
+    Some((var_name.trim(), pattern))
+}
+
+/// Parse "var_name.field.0.nested" into (var_name, path_segments).
+fn parse_dot_path(expr: &str) -> Option<(&str, Vec<&str>)> {
+    let dot_idx = expr.find('.')?;
+    let var_name = &expr[..dot_idx];
+    let path_str = &expr[dot_idx + 1..];
+    let segments: Vec<&str> = path_str.split('.').collect();
+    if segments.is_empty() {
+        return None;
+    }
+    Some((var_name.trim(), segments))
+}
+
+/// Navigate a serde_json::Value by dot-path segments.
+fn resolve_json_path(value: &serde_json::Value, segments: &[&str]) -> Result<String> {
+    let mut current = value;
+    for segment in segments {
+        if *segment == "length" {
+            if let Some(arr) = current.as_array() {
+                return Ok(arr.len().to_string());
+            }
+            return Err(anyhow!("'length' used on non-array value"));
+        }
+        if let Ok(idx) = segment.parse::<usize>() {
+            current = current
+                .get(idx)
+                .ok_or_else(|| anyhow!("array index {idx} out of bounds"))?;
+        } else {
+            current = current
+                .get(*segment)
+                .ok_or_else(|| anyhow!("field '{}' not found", segment))?;
+        }
+    }
+    match current {
+        serde_json::Value::String(s) => Ok(s.clone()),
+        serde_json::Value::Null => Ok("null".to_string()),
+        other => Ok(other.to_string()),
+    }
+}
+
+/// Resolve a template expression to its string value.
+///
+/// Supports three forms (tried in order):
+/// 1. Regex extraction: `"ver:/v(\d+)/"` -> applies regex to `ver` value
+/// 2. Exact key match: `"name"` or `"command_output.prev"` -> direct lookup in vars
+/// 3. JSON dot-path: `"data.status"` -> parses `data` as JSON, navigates to `.status`
+pub fn resolve_expression(expr: &str, vars: &HashMap<String, String>) -> Result<String> {
+    if let Some((var_name, pattern)) = parse_regex_expr(expr) {
+        let raw = vars
+            .get(var_name)
+            .ok_or_else(|| anyhow!("unknown variable: '{var_name}'"))?;
+        return Ok(extract_regex(raw, pattern));
+    }
+    // Try exact key match first (handles keys with dots like "command_output.prev")
+    if let Some(val) = vars.get(expr) {
+        return Ok(val.clone());
+    }
+    if let Some((var_name, segments)) = parse_dot_path(expr) {
+        let raw = vars
+            .get(var_name)
+            .ok_or_else(|| anyhow!("unknown variable: '{var_name}'"))?;
+        let json: serde_json::Value = serde_json::from_str(raw).map_err(|_| {
+            anyhow!("variable '{var_name}' is not valid JSON for dot-path access")
+        })?;
+        return resolve_json_path(&json, &segments);
+    }
+    Err(anyhow!("unknown variable: '{expr}'"))
+}
+
 /// Scan a template string for {{ expression }} spans.
 /// Handles :/regex/ bodies that may contain } characters.
 /// Returns Vec of (start_byte, end_byte, trimmed_expression).
@@ -197,10 +283,10 @@ mod tests {
 
     #[test]
     fn test_sanitize_shell_value_truncates() {
-        let long = "x".repeat(5000);
+        let long = "x".repeat(200_100);
         let result = sanitize_shell_value(&long);
         assert!(result.ends_with("...(truncated)"));
-        assert!(result.chars().count() < 5000);
+        assert!(result.chars().count() < 200_100);
     }
 
     #[test]
@@ -280,5 +366,58 @@ mod tests {
         let spans = scan_template_expressions("{{ val:/foo\\\\/ }}");
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].2, "val:/foo\\\\/");
+    }
+
+    #[test]
+    fn test_resolve_simple_var() {
+        let v = vars(&[("name", "hello")]);
+        assert_eq!(resolve_expression("name", &v).unwrap(), "hello");
+    }
+
+    #[test]
+    fn test_resolve_unknown_var_errors() {
+        let v = vars(&[]);
+        assert!(resolve_expression("missing", &v).is_err());
+    }
+
+    #[test]
+    fn test_resolve_dot_path_object() {
+        let v = vars(&[("data", r#"{"status":"ok","count":3}"#)]);
+        assert_eq!(resolve_expression("data.status", &v).unwrap(), "ok");
+        assert_eq!(resolve_expression("data.count", &v).unwrap(), "3");
+    }
+
+    #[test]
+    fn test_resolve_dot_path_array() {
+        let v = vars(&[("items", r#"[{"name":"a"},{"name":"b"}]"#)]);
+        assert_eq!(resolve_expression("items.0.name", &v).unwrap(), "a");
+        assert_eq!(resolve_expression("items.1.name", &v).unwrap(), "b");
+    }
+
+    #[test]
+    fn test_resolve_dot_path_length() {
+        let v = vars(&[("arr", r#"[1,2,3]"#)]);
+        assert_eq!(resolve_expression("arr.length", &v).unwrap(), "3");
+    }
+
+    #[test]
+    fn test_resolve_dot_path_not_json_errors() {
+        let v = vars(&[("plain", "just text")]);
+        assert!(resolve_expression("plain.field", &v).is_err());
+    }
+
+    #[test]
+    fn test_resolve_regex_capture_group() {
+        let v = vars(&[("ver", "release v1.2.3 deployed")]);
+        assert_eq!(
+            resolve_expression("ver:/v(\\d+\\.\\d+\\.\\d+)/", &v).unwrap(),
+            "1.2.3"
+        );
+    }
+
+    #[test]
+    fn test_resolve_regex_no_match_empty() {
+        let v = vars(&[("text", "no numbers here")]);
+        assert_eq!(resolve_expression("text:/\\d+/", &v).unwrap(), "");
     }
 }
