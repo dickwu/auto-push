@@ -169,9 +169,8 @@ pub fn resolve_expression(expr: &str, vars: &HashMap<String, String>) -> Result<
         let raw = vars
             .get(var_name)
             .ok_or_else(|| anyhow!("unknown variable: '{var_name}'"))?;
-        let json: serde_json::Value = serde_json::from_str(raw).map_err(|_| {
-            anyhow!("variable '{var_name}' is not valid JSON for dot-path access")
-        })?;
+        let json: serde_json::Value = serde_json::from_str(raw)
+            .map_err(|_| anyhow!("variable '{var_name}' is not valid JSON for dot-path access"))?;
         return resolve_json_path(&json, &segments);
     }
     Err(anyhow!("unknown variable: '{expr}'"))

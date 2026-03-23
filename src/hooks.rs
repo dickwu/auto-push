@@ -1,4 +1,4 @@
-use crate::config::{self, HookCommand};
+use crate::config::{self, PipelineCommand};
 use crate::template;
 use anyhow::{Context, Result, bail};
 use std::collections::HashMap;
@@ -95,7 +95,7 @@ fn prompt_confirm(question: &str) -> Result<bool> {
 /// - `force`: auto-accept all `confirm` prompts without asking.
 pub fn run_phase(
     phase: HookPhase,
-    commands: &[HookCommand],
+    commands: &[PipelineCommand],
     template_ctx: &mut TemplateContext,
     dry_run: bool,
     force: bool,
@@ -111,14 +111,15 @@ pub fn run_phase(
     for (i, cmd) in commands.iter().enumerate() {
         let step = i + 1;
         let desc = config::auto_description(cmd);
+        let run_str = cmd.run.as_deref().unwrap_or("");
 
-        let resolved_run = render_hook_template(&cmd.run, template_ctx, &cmd.name, &cmd.run, phase);
+        let resolved_run = render_hook_template(run_str, template_ctx, &cmd.name, run_str, phase);
         println!("[{label}] [{step}/{total}] {desc}...");
 
         if dry_run {
             if let Some(ref confirm_tmpl) = cmd.confirm {
                 let resolved =
-                    render_hook_template(confirm_tmpl, template_ctx, &cmd.name, &cmd.run, phase);
+                    render_hook_template(confirm_tmpl, template_ctx, &cmd.name, run_str, phase);
                 println!("[{label}] [dry-run] Would confirm: {resolved}");
             }
             println!("[{label}] [dry-run] Would run: {resolved_run}");
@@ -131,7 +132,7 @@ pub fn run_phase(
         // Handle confirm prompt
         if let Some(ref confirm_tmpl) = cmd.confirm {
             let resolved =
-                render_hook_template(confirm_tmpl, template_ctx, &cmd.name, &cmd.run, phase);
+                render_hook_template(confirm_tmpl, template_ctx, &cmd.name, run_str, phase);
 
             if force {
                 println!("[{label}] [{step}/{total}] Confirm auto-accepted (--force): {resolved}");
@@ -169,7 +170,7 @@ pub fn run_phase(
             // Run on_error handler if present
             if let Some(on_error_tmpl) = &cmd.on_error {
                 let resolved_on_error =
-                    render_hook_template(on_error_tmpl, template_ctx, &cmd.name, &cmd.run, phase);
+                    render_hook_template(on_error_tmpl, template_ctx, &cmd.name, run_str, phase);
                 println!("[{label}] [on_error] Running: {resolved_on_error}");
                 let _ = execute_command(&resolved_on_error, false);
             }

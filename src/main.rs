@@ -119,7 +119,7 @@ fn main() -> Result<()> {
 
     // Apply --provider CLI override
     if let Some(ref provider_name) = cli.provider {
-        app_config.generate.provider = ProviderConfig::Preset(provider_name.clone());
+        app_config.generate.provider = Some(ProviderConfig::Preset(provider_name.clone()));
         // Reset structured_output to preset default
         app_config.generate.structured_output = None;
     }
