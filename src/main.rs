@@ -3,7 +3,7 @@ mod context;
 mod diff;
 mod generate;
 mod git;
-mod hooks;
+mod pipeline;
 mod preflight;
 mod pull;
 mod push;
@@ -161,18 +161,18 @@ fn main() -> Result<()> {
 
     // Phase 7: Pre-push hooks
     if !ctx.cli.no_hooks && !ctx.cli.no_pre_push && !ctx.app_config.pre_push.is_empty() {
-        let mut template_ctx = hooks::TemplateContext {
+        let mut template_ctx = pipeline::TemplateContext {
             branch: ctx.preflight.branch.clone(),
             remote: ctx.preflight.remote.clone(),
             commit_hash: git::run_git(&["rev-parse", "HEAD"]).unwrap_or_else(|_| {
-                eprintln!("[hooks] Warning: could not resolve HEAD commit hash");
+                eprintln!("[pipeline] Warning: could not resolve HEAD commit hash");
                 String::new()
             }),
             commit_summary: String::new(),
             command_outputs: std::collections::HashMap::new(),
         };
-        hooks::run_phase(
-            hooks::HookPhase::PrePush,
+        pipeline::run_phase(
+            pipeline::HookPhase::PrePush,
             &ctx.app_config.pre_push,
             &mut template_ctx,
             ctx.cli.dry_run,
@@ -192,21 +192,21 @@ fn main() -> Result<()> {
         && !ctx.cli.no_after_push
         && !ctx.app_config.after_push.is_empty()
     {
-        let mut template_ctx = hooks::TemplateContext {
+        let mut template_ctx = pipeline::TemplateContext {
             branch: ctx.preflight.branch.clone(),
             remote: ctx.preflight.remote.clone(),
             commit_hash: git::run_git(&["rev-parse", "HEAD"]).unwrap_or_else(|_| {
-                eprintln!("[hooks] Warning: could not resolve HEAD commit hash");
+                eprintln!("[pipeline] Warning: could not resolve HEAD commit hash");
                 String::new()
             }),
             commit_summary: git::run_git(&["log", "-1", "--format=%s"]).unwrap_or_else(|_| {
-                eprintln!("[hooks] Warning: could not resolve commit summary");
+                eprintln!("[pipeline] Warning: could not resolve commit summary");
                 String::new()
             }),
             command_outputs: std::collections::HashMap::new(),
         };
-        if let Err(e) = hooks::run_phase(
-            hooks::HookPhase::AfterPush,
+        if let Err(e) = pipeline::run_phase(
+            pipeline::HookPhase::AfterPush,
             &ctx.app_config.after_push,
             &mut template_ctx,
             ctx.cli.dry_run,
