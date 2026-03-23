@@ -1,11 +1,10 @@
 # auto-push
 
-CLI tool that automates the git workflow: pull, stage, generate commit messages with AI, and push — in one command. Supports multiple AI providers (Claude, Codex, Ollama, or any custom CLI).
+CLI tool that automates the git workflow: pull, stage, generate commit messages with AI, and push — in one command. Fully configurable via a pipeline of shell commands in `.auto-push.json`.
 
 ## Prerequisites
 
 - [git](https://git-scm.com)
-- [gh](https://cli.github.com) (GitHub CLI)
 - An AI CLI: [claude](https://claude.ai/code) (default), [codex](https://github.com/openai/codex), [ollama](https://ollama.com), or any custom CLI
 
 ## Install
@@ -40,26 +39,26 @@ cargo install --git https://github.com/dickwu/auto-push
 # Pull, stage all, generate commit message, commit, and push
 auto-push
 
-# Review the generated message before committing
+# Review before each step
 auto-push --confirm
 
 # Dry run — see what would happen
 auto-push --dry-run
 
-# Commit only, skip push
-auto-push --no-push
+# Skip specific pipeline steps
+auto-push --skip pull --skip tests
 
-# Use your own commit message
+# Commit only, skip push
+auto-push --skip push
+
+# Use your own commit message (auto-skips AI generation)
 auto-push -m "feat: add user auth"
 
-# Pull with rebase instead of merge
-auto-push --rebase
+# Override template variables from CLI
+auto-push --var slack_channel=#urgent
 
 # Use a different AI provider for this run
 auto-push --provider codex
-
-# Skip AI generation (requires -m)
-auto-push --no-generate -m "chore: manual commit"
 
 # Show the merged config for the current branch
 auto-push --show-config
@@ -73,104 +72,166 @@ auto-push is configured via `.auto-push.json`. On first run, it auto-creates one
 
 | Layer | Location | Purpose |
 |-------|----------|---------|
-| Built-in defaults | hardcoded | Claude as provider, conventional commits |
+| Built-in defaults | hardcoded | Conventional commits, standard pipeline |
 | Global config | `~/.auto-push.json` | User-level preferences across all repos |
 | Repo config | `<repo>/.auto-push.json` | Project-level settings |
 | Branch overrides | `branches` key in repo config | Branch-specific rules |
-| CLI flags | `--provider`, `--message`, etc. | One-time overrides |
+| CLI flags | `--skip`, `--var`, `-m`, etc. | One-time overrides |
 
-Each layer deep-merges into the previous. Arrays (like hooks) are replaced, not merged.
+Each layer deep-merges into the previous. Arrays (like `pipeline`) are replaced, not merged.
 
-### Full config example
+### Pipeline
+
+The `pipeline` array defines every step of the workflow. Each entry is a command that runs in order:
+
+```json
+{
+  "pipeline": [
+    { "name": "stash",    "run": "git stash push -m 'auto-push' || true" },
+    { "name": "pull",     "run": "git pull" },
+    { "name": "unstash",  "run": "git stash pop || true" },
+    { "name": "tests",    "run": "cargo test" },
+    { "name": "lint",     "run": "cargo clippy -- -D warnings" },
+    { "name": "stage",    "run": "git add -A" },
+    {
+      "name": "generate",
+      "command": "claude",
+      "args": ["-p", "{{ diff }}", "--system-prompt", "{{ system_prompt }}", "--output-format", "text", "--no-session-persistence", "--tools", ""],
+      "capture": "commit_message"
+    },
+    {
+      "name": "commit",
+      "run": "git commit -m '{{ commit_message }}'",
+      "capture_after": [
+        { "name": "commit_hash", "run": "git rev-parse --short HEAD" },
+        { "name": "commit_summary", "run": "git log -1 --format=%s" }
+      ]
+    },
+    {
+      "name": "push",
+      "run": "git push origin {{ branch }}",
+      "on_error": "sleep 2 && git push origin {{ branch }}"
+    }
+  ]
+}
+```
+
+### Two execution modes
+
+**Shell mode** (`run` field) — command passed to `sh -c`. Good for simple commands:
+
+```json
+{ "name": "tests", "run": "cargo test" }
+```
+
+**Argv mode** (`command` + `args` fields) — arguments passed directly, no shell escaping issues. Recommended for AI providers where prompts contain quotes, newlines, and large diffs:
+
+```json
+{
+  "name": "generate",
+  "command": "claude",
+  "args": ["-p", "{{ diff }}", "--system-prompt", "{{ system_prompt }}"],
+  "capture": "commit_message"
+}
+```
+
+### Command fields
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | string | Unique identifier (used by `--skip`) |
+| `run` | string | Shell command (mutually exclusive with `command`) |
+| `command` | string | Program to execute directly (mutually exclusive with `run`) |
+| `args` | string[] | Arguments for `command` mode |
+| `description` | string | Human-readable summary (auto-generated if omitted) |
+| `capture` | string | Store stdout into a named template variable |
+| `capture_after` | array | Run additional commands post-success to capture variables |
+| `capture_mode` | string | What to capture: `"stdout"` (default), `"stderr"`, `"both"` |
+| `on_error` | string | Shell command to run if the main command fails |
+| `confirm` | string | Prompt for confirmation before running |
+| `interactive` | bool | Give the command full TTY access (disables capture) |
+
+### Template variables
+
+Variables are available in `run`, `args`, `on_error`, and `confirm` fields via `{{ var_name }}` syntax.
+
+**Built-in variables:**
+
+| Variable | Description |
+|---|---|
+| `{{ branch }}` | Current branch name |
+| `{{ remote }}` | Remote name (e.g. `origin`) |
+| `{{ remote_url }}` | Remote URL |
+| `{{ repo_root }}` | Repository root path |
+| `{{ diff }}` | Staged diff (dynamic, recomputed after git changes) |
+| `{{ diff_stat }}` | Staged diff stats |
+| `{{ staged_files }}` | List of staged files |
+| `{{ staged_count }}` | Number of staged files |
+| `{{ system_prompt }}` | AI system prompt (from generate config) |
+| `{{ style_suffix }}` | Commit style rules |
+
+**Captured variables** — output from earlier pipeline commands:
+
+| Variable | Source |
+|---|---|
+| `{{ commit_message }}` | Captured from `generate` command |
+| `{{ commit_hash }}` | Captured via `capture_after` on `commit` |
+| `{{ commit_summary }}` | Captured via `capture_after` on `commit` |
+
+**User variables** — defined in config:
+
+```json
+{
+  "vars": { "slack_channel": "#deploys", "team": "backend" },
+  "pipeline": [
+    { "name": "notify", "run": "echo 'Pushed by {{ team }} to {{ slack_channel }}'" }
+  ]
+}
+```
+
+### Structured variable access
+
+**JSON dot-path** — access fields when a captured value is JSON:
+
+```
+{{ plan.0.message }}     → first element's "message" field
+{{ result.status }}      → field on an object
+{{ items.length }}       → array length
+```
+
+**Regex extraction** — extract parts of a value:
+
+```
+{{ version:/v(\d+\.\d+\.\d+)/ }}   → "1.2.3"
+{{ output:/error: (.*)/ }}          → "file not found"
+```
+
+### Variable validation
+
+auto-push validates all template variables at config load time:
+- No duplicate variable names across built-ins, user vars, and captures
+- Every `{{ var }}` reference must be resolvable at that point in the pipeline
+- Forward references (using a var before the command that captures it) produce clear errors
+
+### AI providers
+
+The `generate` metadata section configures commit style and system prompts:
 
 ```json
 {
   "generate": {
-    "provider": "claude",
     "commit_style": {
       "format": "conventional",
       "types": ["feat", "fix", "refactor", "docs", "test", "chore", "perf", "ci"],
       "max_length": 72,
       "include_body": true
     },
-    "max_diff_bytes": 20000,
-    "timeout_secs": 0
-  },
-  "pre_push": [
-    {
-      "name": "tests",
-      "description": "Run the project test suite",
-      "run": "cargo test"
-    },
-    {
-      "name": "lint",
-      "run": "cargo clippy -- -D warnings",
-      "on_error": "echo 'Lint failed — fix warnings before pushing'"
-    }
-  ],
-  "after_push": [
-    {
-      "name": "notify",
-      "run": "echo 'Pushed {{ branch }} ({{ commit_hash }})'"
-    }
-  ],
-  "branches": {
-    "main": {
-      "generate": {
-        "commit_style": { "max_length": 50, "include_body": true }
-      }
-    },
-    "feature/*": {
-      "generate": {
-        "commit_style": { "max_length": 100 }
-      }
-    }
+    "max_diff_bytes": 20000
   }
 }
 ```
 
-### AI providers
-
-Switch providers with one field change:
-
-```json
-{ "generate": { "provider": "codex" } }
-```
-
-Built-in presets:
-
-| Provider | Default | Structured output | Notes |
-|----------|---------|-------------------|-------|
-| `claude` | yes | yes | Full features: hunk splitting, push recovery, conflict resolution |
-| `codex` | no | no | Commit message generation only |
-| `ollama` | no | no | Requires `model` field (e.g. `"llama3"`) |
-
-Custom provider:
-
-```json
-{
-  "generate": {
-    "provider": {
-      "command": "my-ai-tool",
-      "args": ["--prompt", "{{ prompt }}"],
-      "model": "my-model"
-    }
-  }
-}
-```
-
-Providers without structured output gracefully degrade: hunk-level commit splitting and push error recovery are disabled, and conflict resolution falls back to manual.
-
-### Commit style
-
-The `commit_style` config controls the style rules injected into AI prompts:
-
-| Field | Default | Description |
-|-------|---------|-------------|
-| `format` | `"conventional"` | Commit format name |
-| `types` | `["feat", "fix", ...]` | Allowed commit types |
-| `max_length` | `72` | Max first-line length |
-| `include_body` | `true` | Whether to include a commit body |
+The actual AI invocation is a pipeline command — you control exactly how it's called.
 
 ### Branch overrides
 
@@ -179,73 +240,17 @@ Override any config per branch using glob patterns:
 ```json
 {
   "branches": {
-    "main": { "generate": { "commit_style": { "max_length": 50 } } },
-    "feature/*": { "pre_push": [] }
+    "main": { "pipeline": [] },
+    "feature/*": {
+      "generate": { "commit_style": { "max_length": 100 } }
+    }
   }
 }
 ```
 
-An empty array `[]` disables all hooks for that branch. Patterns use [globset](https://docs.rs/globset) syntax.
+### Legacy config migration
 
-## Hooks
-
-Pre-push hooks run after `git pull` to validate the combined state. After-push hooks run once the push succeeds.
-
-### Command fields
-
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `name` | string | yes | Unique identifier within the phase |
-| `description` | string | no | Human-readable summary (auto-generated if omitted) |
-| `run` | string | yes | Shell command to execute (supports template variables) |
-| `on_error` | string | no | Shell command to run if `run` fails |
-| `confirm` | string | no | Prompt the user for confirmation before running |
-| `interactive` | bool | no | Give the command full TTY access |
-
-### Confirmation prompts
-
-```json
-{
-  "name": "deploy",
-  "confirm": "Deploy {{ branch }} to production?",
-  "run": "deploy.sh {{ branch }}"
-}
-```
-
-- **User declines a pre-push confirm** — push is aborted
-- **User declines an after-push confirm** — that command is skipped
-- **`--force`** — all confirms are auto-accepted
-- **No TTY (CI)** — all confirms are auto-accepted
-
-### Interactive commands
-
-Set `interactive` for commands that need user input:
-
-```json
-{ "name": "select-target", "run": "interactive-deploy-picker", "interactive": true }
-```
-
-Output is not captured for interactive commands (`{{ command_output.NAME }}` will be empty).
-
-### Template variables
-
-| Variable | Description |
-|---|---|
-| `{{ branch }}` | Current branch name |
-| `{{ remote }}` | Remote name (e.g. `origin`) |
-| `{{ commit_hash }}` | HEAD commit hash |
-| `{{ commit_summary }}` | Subject line of the latest commit (after-push only) |
-| `{{ command_name }}` | Name of the current command |
-| `{{ command_output.NAME }}` | Stdout of a previously run command |
-| `{{ command_output.NAME \| /regex/ }}` | Regex extraction from a command's output |
-
-### Skip hooks
-
-```bash
-auto-push --no-hooks        # Skip all hooks
-auto-push --no-pre-push     # Skip pre-push hooks only
-auto-push --no-after-push   # Skip after-push hooks only
-```
+Old configs using `pre_push`/`after_push` arrays are automatically migrated to the `pipeline` format at runtime with a deprecation warning. Update your config to use `pipeline` directly.
 
 ## How it works
 
@@ -255,49 +260,51 @@ auto-push --no-after-push   # Skip after-push hooks only
          └──────┬───────┘
                 │
          ┌──────▼───────┐
-      1. │  Auto-stash   │  protect dirty working tree
+      1. │  Preflight     │  validate git state
          └──────┬───────┘
                 │
          ┌──────▼───────┐
-      2. │  git pull      │  sync with remote (--rebase optional)
+      2. │  Load config   │  .auto-push.json (auto-init if missing)
          └──────┬───────┘
                 │
          ┌──────▼───────┐
-      3. │  Submodule     │  sync .gitmodules
-         │  sync          │
+      3. │  Build vars    │  static + dynamic + user vars
          └──────┬───────┘
                 │
          ┌──────▼───────┐
-      4. │  Unstash       │  restore local changes
-         └──────┬───────┘
-                │
-         ┌──────▼───────┐     ┌─────────────────┐
-      5. │  Pre-push      │────▶  .auto-push.json  │
-         │  hooks         │◀────  (confirm, etc.)  │
-         └──────┬───────┘     └─────────────────┘
-                │  bail on failure
-         ┌──────▼───────┐     ┌─────────────────┐
-      6. │  git add -A    │    │  AI provider     │
-         │  → get diff    │────▶  (configurable)   │
-      7. │  → gen message │◀────  claude / codex   │
-         └──────┬───────┘     └─────────────────┘
-                │
-         ┌──────▼───────┐
-      8. │  git commit    │
-         └──────┬───────┘
-                │
-         ┌──────▼───────┐
-      9. │  Push via gh   │  fallback to git push
-         └──────┬───────┘
-                │
-         ┌──────▼───────┐
-     10. │  After-push    │  {{ commit_summary }} available
-         │  hooks         │
+      4. │  Pipeline      │  execute each command in order:
+         │  engine        │  stash → pull → unstash → tests →
+         │                │  stage → generate → commit → push
          └──────┬───────┘
                 │
                 ▼
              Done
 ```
+
+Each pipeline step is a configurable shell command. Skip any step with `--skip <name>`.
+
+## CLI Reference
+
+| Flag | Description |
+|---|---|
+| `--skip <name>` | Skip a pipeline command by name (repeatable) |
+| `--var <key>=<value>` | Override or add a template variable (repeatable) |
+| `-m <message>` | Use a manual commit message (auto-skips generate) |
+| `--dry-run` | Preview without executing |
+| `--confirm` | Prompt before each step |
+| `--force` | Auto-accept all confirmation prompts |
+| `--provider <name>` | Override the generate command's provider |
+| `--show-config` | Show merged config and exit |
+
+**Deprecated flags** (kept for one major version):
+
+| Old flag | Use instead |
+|---|---|
+| `--no-pull` | `--skip pull` |
+| `--no-push` | `--skip push` |
+| `--no-generate` | `--skip generate` |
+| `--no-stash` | `--skip stash` |
+| `--rebase` | Set `git pull --rebase` in your pipeline |
 
 ## Releasing
 
