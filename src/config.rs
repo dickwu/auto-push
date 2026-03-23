@@ -1,6 +1,7 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use globset::GlobBuilder;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 const CONFIG_FILE: &str = ".auto-push.json";
@@ -10,23 +11,25 @@ const CONFIG_FILE: &str = ".auto-push.json";
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct AppConfig {
     #[serde(default)]
     pub generate: GenerateConfig,
     #[serde(default)]
-    pub pre_push: Vec<HookCommand>,
+    pub vars: HashMap<String, String>,
     #[serde(default)]
-    pub after_push: Vec<HookCommand>,
+    pub pipeline: Option<Vec<PipelineCommand>>,
+    #[serde(default)]
+    pub pre_push: Vec<PipelineCommand>,
+    #[serde(default)]
+    pub after_push: Vec<PipelineCommand>,
     #[serde(default)]
     pub branches: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct GenerateConfig {
-    #[serde(default = "default_provider")]
-    pub provider: ProviderConfig,
+    #[serde(default)]
+    pub provider: Option<ProviderConfig>,
     #[serde(default)]
     pub commit_style: CommitStyle,
     #[serde(default)]
@@ -82,18 +85,46 @@ pub struct CustomPrompts {
     pub conflict_resolve: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HookCommand {
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PipelineCommand {
     pub name: String,
+    /// Shell mode: template string passed to sh -c
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run: Option<String>,
+    /// Argv mode: command name
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// Argv mode: command arguments
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    pub run: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub on_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub confirm: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub interactive: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capture: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capture_after: Option<Vec<CaptureAfterEntry>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capture_mode: Option<CaptureMode>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaptureAfterEntry {
+    pub name: String,
+    pub run: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CaptureMode {
+    Stdout,
+    Stderr,
+    Both,
 }
 
 fn is_false(v: &bool) -> bool {
@@ -103,10 +134,6 @@ fn is_false(v: &bool) -> bool {
 // ---------------------------------------------------------------------------
 // Defaults
 // ---------------------------------------------------------------------------
-
-fn default_provider() -> ProviderConfig {
-    ProviderConfig::Preset("claude".into())
-}
 
 fn default_format() -> String {
     "conventional".into()
@@ -136,7 +163,7 @@ fn default_max_diff_bytes() -> usize {
 impl Default for GenerateConfig {
     fn default() -> Self {
         Self {
-            provider: default_provider(),
+            provider: None,
             commit_style: CommitStyle::default(),
             prompts: CustomPrompts::default(),
             max_diff_bytes: default_max_diff_bytes(),
@@ -162,70 +189,12 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             generate: GenerateConfig::default(),
+            vars: HashMap::new(),
+            pipeline: None,
             pre_push: Vec::new(),
             after_push: Vec::new(),
             branches: serde_json::Map::new(),
         }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Provider presets
-// ---------------------------------------------------------------------------
-
-pub struct ResolvedProvider {
-    pub command: String,
-    pub args: Vec<String>,
-    pub model: Option<String>,
-    pub structured_output: bool,
-}
-
-pub fn resolve_provider(config: &GenerateConfig) -> Result<ResolvedProvider> {
-    let explicit_structured = config.structured_output;
-
-    match &config.provider {
-        ProviderConfig::Preset(name) => match name.as_str() {
-            "claude" => Ok(ResolvedProvider {
-                command: "claude".into(),
-                args: vec![
-                    "-p".into(),
-                    "{{ prompt }}".into(),
-                    "--system-prompt".into(),
-                    "{{ system_prompt }}".into(),
-                ],
-                model: None,
-                structured_output: explicit_structured.unwrap_or(true),
-            }),
-            "codex" => Ok(ResolvedProvider {
-                command: "codex".into(),
-                args: vec!["--quiet".into(), "--prompt".into(), "{{ prompt }}".into()],
-                model: None,
-                structured_output: explicit_structured.unwrap_or(false),
-            }),
-            "ollama" => Ok(ResolvedProvider {
-                command: "ollama".into(),
-                args: vec!["run".into(), "{{ model }}".into(), "{{ prompt }}".into()],
-                model: None,
-                structured_output: explicit_structured.unwrap_or(false),
-            }),
-            other => bail!(
-                "unknown provider preset: '{other}'. Use 'claude', 'codex', 'ollama', or a custom provider object."
-            ),
-        },
-        ProviderConfig::Custom(custom) => Ok(ResolvedProvider {
-            command: custom.command.clone(),
-            args: custom.args.clone(),
-            model: custom.model.clone(),
-            structured_output: explicit_structured.unwrap_or(false),
-        }),
-    }
-}
-
-/// Check if the resolved provider is Claude (needed for Claude-only features).
-pub fn is_claude_provider(config: &GenerateConfig) -> bool {
-    match &config.provider {
-        ProviderConfig::Preset(name) => name == "claude",
-        ProviderConfig::Custom(c) => c.command == "claude",
     }
 }
 
@@ -306,8 +275,26 @@ pub fn load(repo_root: &Path, branch: &str) -> Result<AppConfig> {
         obj.remove("branches");
     }
 
-    let config: AppConfig =
+    let mut config: AppConfig =
         serde_json::from_value(merged).context("failed to deserialize merged config")?;
+
+    // Migrate legacy pre_push/after_push to pipeline if no pipeline is set
+    if config.pipeline.is_none() && (!config.pre_push.is_empty() || !config.after_push.is_empty()) {
+        let migrated = migrate_to_pipeline(&config)?;
+        config = AppConfig {
+            pipeline: Some(migrated),
+            ..config
+        };
+    }
+
+    // Validate variable registry (catches duplicates, forward refs, collisions)
+    if let Some(ref pipeline) = config.pipeline {
+        crate::vars::validate_var_registry(pipeline, &config.vars)?;
+    }
+    // Also validate legacy pre_push/after_push if no pipeline
+    if config.pipeline.is_none() && !config.pre_push.is_empty() {
+        crate::vars::validate_var_registry(&config.pre_push, &config.vars)?;
+    }
 
     Ok(config)
 }
@@ -360,43 +347,126 @@ fn apply_branch_overrides(merged: &mut serde_json::Value, branch: &str) -> Resul
 
 fn auto_init(repo_root: &Path) -> Result<()> {
     let path = config_path(repo_root);
-
-    // Detect provider
     let provider = detect_provider();
-
-    // Detect project type for hooks
-    let pre_push = detect_pre_push_hooks(repo_root);
+    let project_commands = detect_project_commands(repo_root);
 
     let mut config = serde_json::Map::new();
 
-    // Only write provider if detected
-    if let Some(prov) = provider {
-        let mut generate_obj = serde_json::Map::new();
-        generate_obj.insert("provider".into(), serde_json::Value::String(prov.clone()));
-        config.insert("generate".into(), serde_json::Value::Object(generate_obj));
-        println!("[config] Auto-detected provider: {prov}");
-    } else {
-        eprintln!(
-            "[config] Warning: no AI CLI detected. Install claude, codex, or ollama, \
-             or configure a custom provider in .auto-push.json."
-        );
+    // Build pipeline array
+    let mut pipeline = Vec::new();
+
+    // Stash + Pull + Unstash
+    pipeline.push(serde_json::json!({
+        "name": "stash",
+        "run": "git stash push -m 'auto-push auto-stash' || true",
+        "description": "Stash uncommitted changes"
+    }));
+    pipeline.push(serde_json::json!({
+        "name": "pull",
+        "run": "git pull",
+        "description": "Pull latest changes"
+    }));
+    pipeline.push(serde_json::json!({
+        "name": "unstash",
+        "run": "git stash pop || true",
+        "description": "Restore stashed changes"
+    }));
+
+    // Project-specific commands (tests, lint, fmt)
+    for cmd in &project_commands {
+        pipeline.push(serde_json::to_value(cmd).context("failed to serialize project command")?);
     }
 
-    config.insert(
-        "pre_push".into(),
-        serde_json::to_value(&pre_push).context("failed to serialize pre_push")?,
-    );
-    config.insert("after_push".into(), serde_json::Value::Array(vec![]));
+    // Stage
+    pipeline.push(serde_json::json!({
+        "name": "stage",
+        "run": "git add -A",
+        "description": "Stage all changes"
+    }));
 
+    // Generate (provider-specific, argv mode)
+    if let Some(ref prov) = provider {
+        let gen_cmd = match prov.as_str() {
+            "claude" => serde_json::json!({
+                "name": "generate",
+                "command": "claude",
+                "args": [
+                    "-p",
+                    "Generate a commit message for this diff:\n\n{{ diff }}",
+                    "--system-prompt", "{{ system_prompt }}",
+                    "--output-format", "text",
+                    "--no-session-persistence",
+                    "--tools", ""
+                ],
+                "capture": "commit_message",
+                "description": "Generate commit message with AI"
+            }),
+            "codex" => serde_json::json!({
+                "name": "generate",
+                "command": "codex",
+                "args": [
+                    "exec", "--color", "never",
+                    "{{ system_prompt }}\n\nGenerate a commit message for this diff:\n\n{{ diff }}"
+                ],
+                "capture": "commit_message",
+                "description": "Generate commit message with AI"
+            }),
+            "ollama" => serde_json::json!({
+                "name": "generate",
+                "command": "ollama",
+                "args": [
+                    "run", "llama3",
+                    "{{ system_prompt }}\n\nGenerate a commit message for this diff:\n\n{{ diff }}"
+                ],
+                "capture": "commit_message",
+                "description": "Generate commit message with AI"
+            }),
+            _ => serde_json::json!({
+                "name": "generate",
+                "run": "echo 'No AI provider detected. Install claude, codex, or ollama.'",
+                "capture": "commit_message",
+                "description": "Generate commit message with AI (PLACEHOLDER)"
+            }),
+        };
+        pipeline.push(gen_cmd);
+        println!("[config] Auto-detected provider: {prov}");
+    } else {
+        eprintln!("[config] Warning: no AI CLI detected. Install claude, codex, or ollama.");
+        pipeline.push(serde_json::json!({
+            "name": "generate",
+            "run": "echo 'Configure an AI provider in .auto-push.json'",
+            "capture": "commit_message"
+        }));
+    }
+
+    // Commit
+    pipeline.push(serde_json::json!({
+        "name": "commit",
+        "run": "git commit -m '{{ commit_message }}'",
+        "description": "Create commit",
+        "capture_after": [
+            {"name": "commit_hash", "run": "git rev-parse --short HEAD"},
+            {"name": "commit_summary", "run": "git log -1 --format=%s"}
+        ]
+    }));
+
+    // Push
+    pipeline.push(serde_json::json!({
+        "name": "push",
+        "run": "git push origin {{ branch }}",
+        "description": "Push to remote",
+        "on_error": "sleep 2 && git push origin {{ branch }}"
+    }));
+
+    config.insert("pipeline".into(), serde_json::Value::Array(pipeline));
+
+    // Write config
     let content =
         serde_json::to_string_pretty(&config).context("failed to serialize auto-init config")?;
-
     std::fs::write(&path, format!("{content}\n"))
         .with_context(|| format!("failed to write {}", path.display()))?;
 
-    // Update .gitignore
     update_gitignore(repo_root);
-
     println!("[config] Created {CONFIG_FILE}. Run `auto-push --show-config` to see full config.");
 
     Ok(())
@@ -420,70 +490,56 @@ fn command_exists(name: &str) -> bool {
         .is_ok()
 }
 
-fn detect_pre_push_hooks(repo_root: &Path) -> Vec<HookCommand> {
+fn detect_project_commands(repo_root: &Path) -> Vec<PipelineCommand> {
     if repo_root.join("Cargo.toml").exists() {
         vec![
-            HookCommand {
+            PipelineCommand {
                 name: "tests".into(),
                 description: Some("Run the project test suite".into()),
-                run: "cargo test".into(),
-                on_error: None,
-                confirm: None,
-                interactive: false,
+                run: Some("cargo test".into()),
+                ..Default::default()
             },
-            HookCommand {
+            PipelineCommand {
                 name: "lint".into(),
                 description: Some("Check for common mistakes and style issues".into()),
-                run: "cargo clippy -- -D warnings".into(),
-                on_error: None,
-                confirm: None,
-                interactive: false,
+                run: Some("cargo clippy -- -D warnings".into()),
+                ..Default::default()
             },
-            HookCommand {
+            PipelineCommand {
                 name: "format check".into(),
                 description: Some("Verify code formatting matches rustfmt rules".into()),
-                run: "cargo fmt -- --check".into(),
-                on_error: None,
-                confirm: None,
-                interactive: false,
+                run: Some("cargo fmt -- --check".into()),
+                ..Default::default()
             },
         ]
     } else if repo_root.join("package.json").exists() {
         vec![
-            HookCommand {
+            PipelineCommand {
                 name: "tests".into(),
                 description: Some("Run the project test suite".into()),
-                run: "npm test".into(),
-                on_error: None,
-                confirm: None,
-                interactive: false,
+                run: Some("npm test".into()),
+                ..Default::default()
             },
-            HookCommand {
+            PipelineCommand {
                 name: "lint".into(),
                 description: Some("Check for common mistakes and style issues".into()),
-                run: "npm run lint".into(),
-                on_error: None,
-                confirm: None,
-                interactive: false,
+                run: Some("npm run lint".into()),
+                ..Default::default()
             },
         ]
     } else if repo_root.join("go.mod").exists() {
         vec![
-            HookCommand {
+            PipelineCommand {
                 name: "tests".into(),
                 description: Some("Run the project test suite".into()),
-                run: "go test ./...".into(),
-                on_error: None,
-                confirm: None,
-                interactive: false,
+                run: Some("go test ./...".into()),
+                ..Default::default()
             },
-            HookCommand {
+            PipelineCommand {
                 name: "vet".into(),
                 description: Some("Check for suspicious constructs".into()),
-                run: "go vet ./...".into(),
-                on_error: None,
-                confirm: None,
-                interactive: false,
+                run: Some("go vet ./...".into()),
+                ..Default::default()
             },
         ]
     } else {
@@ -526,6 +582,168 @@ fn update_gitignore(repo_root: &Path) {
 }
 
 // ---------------------------------------------------------------------------
+// Legacy config migration
+// ---------------------------------------------------------------------------
+
+/// Migrate legacy `pre_push`/`after_push` configs into a unified `pipeline` array.
+///
+/// Build order: stash, pull, unstash, stage, <pre_push>, generate, commit, push, <after_push>
+pub fn migrate_to_pipeline(config: &AppConfig) -> Result<Vec<PipelineCommand>> {
+    let mut pipeline = vec![
+        // Stash
+        PipelineCommand {
+            name: "stash".into(),
+            run: Some("git stash push -m 'auto-push auto-stash' || true".into()),
+            description: Some("Stash uncommitted changes".into()),
+            ..Default::default()
+        },
+        // Pull
+        PipelineCommand {
+            name: "pull".into(),
+            run: Some("git pull".into()),
+            description: Some("Pull latest changes".into()),
+            ..Default::default()
+        },
+        // Unstash
+        PipelineCommand {
+            name: "unstash".into(),
+            run: Some("git stash pop || true".into()),
+            description: Some("Restore stashed changes".into()),
+            ..Default::default()
+        },
+        // Stage
+        PipelineCommand {
+            name: "stage".into(),
+            run: Some("git add -A".into()),
+            description: Some("Stage all changes".into()),
+            ..Default::default()
+        },
+    ];
+
+    // Pre-push hooks (migrated with capture_mode: Both to preserve old behavior)
+    for cmd in &config.pre_push {
+        let migrated = PipelineCommand {
+            capture_mode: if cmd.capture_mode.is_none() {
+                Some(CaptureMode::Both)
+            } else {
+                cmd.capture_mode.clone()
+            },
+            ..cmd.clone()
+        };
+        pipeline.push(migrated);
+    }
+
+    // Generate (from provider config)
+    let gen_cmd = build_generate_command(&config.generate)?;
+    pipeline.push(gen_cmd);
+
+    // Commit
+    pipeline.push(PipelineCommand {
+        name: "commit".into(),
+        run: Some("git commit -m '{{ commit_message }}'".into()),
+        description: Some("Create commit".into()),
+        capture_after: Some(vec![
+            CaptureAfterEntry {
+                name: "commit_hash".into(),
+                run: "git rev-parse --short HEAD".into(),
+            },
+            CaptureAfterEntry {
+                name: "commit_summary".into(),
+                run: "git log -1 --format=%s".into(),
+            },
+        ]),
+        ..Default::default()
+    });
+
+    // Push
+    pipeline.push(PipelineCommand {
+        name: "push".into(),
+        run: Some("git push origin {{ branch }}".into()),
+        description: Some("Push to remote".into()),
+        on_error: Some("sleep 2 && git push origin {{ branch }}".into()),
+        ..Default::default()
+    });
+
+    // After-push hooks (migrated with capture_mode: Both to preserve old behavior)
+    for cmd in &config.after_push {
+        let migrated = PipelineCommand {
+            capture_mode: if cmd.capture_mode.is_none() {
+                Some(CaptureMode::Both)
+            } else {
+                cmd.capture_mode.clone()
+            },
+            ..cmd.clone()
+        };
+        pipeline.push(migrated);
+    }
+
+    eprintln!("[config] Migrated pre_push/after_push to pipeline format.");
+    eprintln!("[config] Update your .auto-push.json to use \"pipeline\" directly.");
+
+    Ok(pipeline)
+}
+
+fn build_generate_command(gen_config: &GenerateConfig) -> Result<PipelineCommand> {
+    let provider = gen_config.provider.as_ref();
+
+    let is_claude_default = provider.is_none();
+    let is_claude_preset = matches!(provider, Some(ProviderConfig::Preset(s)) if s == "claude");
+
+    let (command, args) = if is_claude_default || is_claude_preset {
+        (
+            "claude".to_string(),
+            vec![
+                "-p".into(),
+                "{{ diff }}".into(),
+                "--system-prompt".into(),
+                "{{ system_prompt }}".into(),
+                "--output-format".into(),
+                "text".into(),
+                "--no-session-persistence".into(),
+                "--tools".into(),
+                "".into(),
+            ],
+        )
+    } else {
+        match provider {
+            Some(ProviderConfig::Preset(s)) if s == "codex" => (
+                "codex".to_string(),
+                vec![
+                    "exec".into(),
+                    "--color".into(),
+                    "never".into(),
+                    "{{ system_prompt }}\n\nGenerate a commit message for this diff:\n\n{{ diff }}"
+                        .into(),
+                ],
+            ),
+            Some(ProviderConfig::Preset(s)) if s == "ollama" => (
+                "ollama".to_string(),
+                vec![
+                    "run".into(),
+                    "llama3".into(),
+                    "{{ system_prompt }}\n\nGenerate a commit message for this diff:\n\n{{ diff }}"
+                        .into(),
+                ],
+            ),
+            Some(ProviderConfig::Custom(c)) => (c.command.clone(), c.args.clone()),
+            Some(ProviderConfig::Preset(s)) => {
+                anyhow::bail!("Unknown provider preset: '{s}'");
+            }
+            None => unreachable!(), // handled above
+        }
+    };
+
+    Ok(PipelineCommand {
+        name: "generate".into(),
+        command: Some(command),
+        args: Some(args),
+        capture: Some("commit_message".into()),
+        description: Some("Generate commit message with AI".into()),
+        ..Default::default()
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Show config
 // ---------------------------------------------------------------------------
 
@@ -541,33 +759,35 @@ pub fn show_config(repo_root: &Path, branch: &str) -> Result<()> {
 // Auto-description for hook commands
 // ---------------------------------------------------------------------------
 
-pub fn auto_description(cmd: &HookCommand) -> String {
+pub fn auto_description(cmd: &PipelineCommand) -> String {
     if let Some(ref desc) = cmd.description {
         return desc.clone();
     }
 
     // Try to infer from run command
-    let run = cmd.run.trim();
-    if run.starts_with("cargo fmt") {
-        return "Check Rust code formatting".into();
-    }
-    if run.starts_with("cargo clippy") {
-        return "Run Rust linter".into();
-    }
-    if run.starts_with("cargo test") {
-        return "Run Rust tests".into();
-    }
-    if run.starts_with("npm test") || run.starts_with("pnpm test") {
-        return "Run JavaScript tests".into();
-    }
-    if run.contains("eslint") {
-        return "Run JavaScript linter".into();
-    }
-    if run.starts_with("go vet") {
-        return "Run Go static analysis".into();
-    }
-    if run.starts_with("pytest") || run.contains("pytest") {
-        return "Run Python tests".into();
+    if let Some(ref run_str) = cmd.run {
+        let run = run_str.trim();
+        if run.starts_with("cargo fmt") {
+            return "Check Rust code formatting".into();
+        }
+        if run.starts_with("cargo clippy") {
+            return "Run Rust linter".into();
+        }
+        if run.starts_with("cargo test") {
+            return "Run Rust tests".into();
+        }
+        if run.starts_with("npm test") || run.starts_with("pnpm test") {
+            return "Run JavaScript tests".into();
+        }
+        if run.contains("eslint") {
+            return "Run JavaScript linter".into();
+        }
+        if run.starts_with("go vet") {
+            return "Run Go static analysis".into();
+        }
+        if run.starts_with("pytest") || run.contains("pytest") {
+            return "Run Python tests".into();
+        }
     }
 
     // Fallback: humanize the name
@@ -645,73 +865,6 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_provider_claude() {
-        let config = GenerateConfig::default();
-        let resolved = resolve_provider(&config).unwrap();
-        assert_eq!(resolved.command, "claude");
-        assert!(resolved.structured_output);
-    }
-
-    #[test]
-    fn test_resolve_provider_codex() {
-        let config = GenerateConfig {
-            provider: ProviderConfig::Preset("codex".into()),
-            ..Default::default()
-        };
-        let resolved = resolve_provider(&config).unwrap();
-        assert_eq!(resolved.command, "codex");
-        assert!(!resolved.structured_output);
-    }
-
-    #[test]
-    fn test_resolve_provider_unknown_preset() {
-        let config = GenerateConfig {
-            provider: ProviderConfig::Preset("unknown".into()),
-            ..Default::default()
-        };
-        assert!(resolve_provider(&config).is_err());
-    }
-
-    #[test]
-    fn test_resolve_provider_custom() {
-        let config = GenerateConfig {
-            provider: ProviderConfig::Custom(CustomProvider {
-                command: "my-tool".into(),
-                args: vec!["--input".into(), "{{ prompt }}".into()],
-                model: None,
-                description: None,
-            }),
-            ..Default::default()
-        };
-        let resolved = resolve_provider(&config).unwrap();
-        assert_eq!(resolved.command, "my-tool");
-        assert!(!resolved.structured_output);
-    }
-
-    #[test]
-    fn test_resolve_provider_explicit_structured_override() {
-        let config = GenerateConfig {
-            provider: ProviderConfig::Preset("codex".into()),
-            structured_output: Some(true),
-            ..Default::default()
-        };
-        let resolved = resolve_provider(&config).unwrap();
-        assert!(resolved.structured_output);
-    }
-
-    #[test]
-    fn test_is_claude_provider() {
-        let claude_config = GenerateConfig::default();
-        assert!(is_claude_provider(&claude_config));
-
-        let codex_config = GenerateConfig {
-            provider: ProviderConfig::Preset("codex".into()),
-            ..Default::default()
-        };
-        assert!(!is_claude_provider(&codex_config));
-    }
-
-    #[test]
     fn test_style_suffix() {
         let style = CommitStyle::default();
         let suffix = style_suffix(&style);
@@ -737,39 +890,31 @@ mod tests {
 
     #[test]
     fn test_auto_description_explicit() {
-        let cmd = HookCommand {
+        let cmd = PipelineCommand {
             name: "test".into(),
             description: Some("My custom description".into()),
-            run: "cargo test".into(),
-            on_error: None,
-            confirm: None,
-            interactive: false,
+            run: Some("cargo test".into()),
+            ..Default::default()
         };
         assert_eq!(auto_description(&cmd), "My custom description");
     }
 
     #[test]
     fn test_auto_description_inferred() {
-        let cmd = HookCommand {
+        let cmd = PipelineCommand {
             name: "fmt_check".into(),
-            description: None,
-            run: "cargo fmt -- --check".into(),
-            on_error: None,
-            confirm: None,
-            interactive: false,
+            run: Some("cargo fmt -- --check".into()),
+            ..Default::default()
         };
         assert_eq!(auto_description(&cmd), "Check Rust code formatting");
     }
 
     #[test]
     fn test_auto_description_fallback() {
-        let cmd = HookCommand {
+        let cmd = PipelineCommand {
             name: "custom_check".into(),
-            description: None,
-            run: "my-tool check".into(),
-            on_error: None,
-            confirm: None,
-            interactive: false,
+            run: Some("my-tool check".into()),
+            ..Default::default()
         };
         assert_eq!(auto_description(&cmd), "Custom Check");
     }
@@ -787,7 +932,8 @@ mod tests {
         let json = r#"{"pre_push": [{"name": "test", "run": "cargo test"}], "after_push": []}"#;
         let config: AppConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.pre_push.len(), 1);
-        assert!(matches!(config.generate.provider, ProviderConfig::Preset(ref s) if s == "claude"));
+        // provider defaults to None
+        assert!(config.generate.provider.is_none());
     }
 
     #[test]
@@ -800,7 +946,9 @@ mod tests {
             "pre_push": []
         }"#;
         let config: AppConfig = serde_json::from_str(json).unwrap();
-        assert!(matches!(config.generate.provider, ProviderConfig::Preset(ref s) if s == "codex"));
+        assert!(
+            matches!(config.generate.provider, Some(ProviderConfig::Preset(ref s)) if s == "codex")
+        );
         assert_eq!(config.generate.commit_style.max_length, 50);
         // Other defaults still apply
         assert_eq!(config.generate.commit_style.format, "conventional");
@@ -818,7 +966,7 @@ mod tests {
         }"#;
         let config: AppConfig = serde_json::from_str(json).unwrap();
         match &config.generate.provider {
-            ProviderConfig::Custom(c) => {
+            Some(ProviderConfig::Custom(c)) => {
                 assert_eq!(c.command, "my-ai");
                 assert_eq!(c.args.len(), 2);
             }
@@ -875,7 +1023,7 @@ mod tests {
     }
 
     #[test]
-    fn test_auto_init_creates_config() {
+    fn test_auto_init_creates_pipeline_config() {
         let dir = tempfile::tempdir().unwrap();
         // Create a Cargo.toml so it detects Rust project
         std::fs::write(dir.path().join("Cargo.toml"), "[package]").unwrap();
@@ -887,7 +1035,21 @@ mod tests {
 
         let content = std::fs::read_to_string(&config_file).unwrap();
         let val: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert!(val["pre_push"].is_array());
+        assert!(val["pipeline"].is_array());
+        assert!(val.get("pre_push").is_none());
+        // Verify expected pipeline commands exist
+        let pipeline = val["pipeline"].as_array().unwrap();
+        let names: Vec<&str> = pipeline.iter().filter_map(|c| c["name"].as_str()).collect();
+        assert!(names.contains(&"stash"));
+        assert!(names.contains(&"pull"));
+        assert!(names.contains(&"unstash"));
+        assert!(names.contains(&"stage"));
+        assert!(names.contains(&"generate"));
+        assert!(names.contains(&"commit"));
+        assert!(names.contains(&"push"));
+        // Rust project should have tests + lint + format check
+        assert!(names.contains(&"tests"));
+        assert!(names.contains(&"lint"));
     }
 
     #[test]
@@ -923,7 +1085,253 @@ mod tests {
 
         let config = load(dir.path(), "main").unwrap();
         assert_eq!(config.pre_push.len(), 1);
-        // Generate uses defaults
-        assert!(matches!(config.generate.provider, ProviderConfig::Preset(ref s) if s == "claude"));
+        // Generate uses defaults; provider is None
+        assert!(config.generate.provider.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // PipelineCommand tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_pipeline_command_shell_mode() {
+        let json = r#"{"name": "test", "run": "cargo test"}"#;
+        let cmd: PipelineCommand = serde_json::from_str(json).unwrap();
+        assert_eq!(cmd.name, "test");
+        assert_eq!(cmd.run.as_deref(), Some("cargo test"));
+        assert!(cmd.command.is_none());
+    }
+
+    #[test]
+    fn test_pipeline_command_argv_mode() {
+        let json = r#"{"name": "gen", "command": "claude", "args": ["-p", "{{ diff }}"]}"#;
+        let cmd: PipelineCommand = serde_json::from_str(json).unwrap();
+        assert_eq!(cmd.command.as_deref(), Some("claude"));
+        assert_eq!(cmd.args.as_ref().unwrap().len(), 2);
+        assert!(cmd.run.is_none());
+    }
+
+    #[test]
+    fn test_pipeline_command_capture() {
+        let json = r#"{"name": "gen", "run": "echo hello", "capture": "msg"}"#;
+        let cmd: PipelineCommand = serde_json::from_str(json).unwrap();
+        assert_eq!(cmd.capture.as_deref(), Some("msg"));
+    }
+
+    #[test]
+    fn test_pipeline_command_capture_after_ordered() {
+        let json = r#"{"name": "c", "run": "git commit", "capture_after": [{"name": "hash", "run": "git rev-parse HEAD"}, {"name": "msg", "run": "git log -1 --format=%s"}]}"#;
+        let cmd: PipelineCommand = serde_json::from_str(json).unwrap();
+        let ca = cmd.capture_after.unwrap();
+        assert_eq!(ca.len(), 2);
+        assert_eq!(ca[0].name, "hash");
+        assert_eq!(ca[1].name, "msg");
+    }
+
+    #[test]
+    fn test_pipeline_command_capture_mode() {
+        let json =
+            r#"{"name": "t", "run": "cargo test", "capture": "out", "capture_mode": "both"}"#;
+        let cmd: PipelineCommand = serde_json::from_str(json).unwrap();
+        assert!(matches!(cmd.capture_mode, Some(CaptureMode::Both)));
+    }
+
+    #[test]
+    fn test_app_config_with_pipeline() {
+        let json = r#"{"pipeline": [{"name": "test", "run": "cargo test"}]}"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        assert!(config.pipeline.is_some());
+        assert_eq!(config.pipeline.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_app_config_with_vars() {
+        let json = r#"{"vars": {"team": "backend"}, "pipeline": []}"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.vars.get("team").unwrap(), "backend");
+    }
+
+    #[test]
+    fn test_app_config_legacy_still_parses() {
+        let json = r#"{"pre_push": [{"name": "test", "run": "cargo test"}], "after_push": []}"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        assert!(config.pipeline.is_none());
+        assert_eq!(config.pre_push.len(), 1);
+    }
+
+    #[test]
+    fn test_generate_config_legacy_provider_parses() {
+        let json = r#"{"generate": {"provider": "claude"}, "pipeline": []}"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        assert!(config.generate.provider.is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // Legacy config migration tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_migrate_legacy_config_basic() {
+        let json = r#"{
+            "generate": {"provider": "claude"},
+            "pre_push": [{"name": "test", "run": "cargo test"}],
+            "after_push": [{"name": "notify", "run": "echo done"}]
+        }"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        let pipeline = migrate_to_pipeline(&config).unwrap();
+        assert!(pipeline.iter().any(|c| c.name == "stash"));
+        assert!(pipeline.iter().any(|c| c.name == "pull"));
+        assert!(pipeline.iter().any(|c| c.name == "test"));
+        assert!(pipeline.iter().any(|c| c.name == "generate"));
+        assert!(pipeline.iter().any(|c| c.name == "commit"));
+        assert!(pipeline.iter().any(|c| c.name == "push"));
+        assert!(pipeline.iter().any(|c| c.name == "notify"));
+        // Generate uses argv mode
+        let gen_cmd = pipeline.iter().find(|c| c.name == "generate").unwrap();
+        assert!(gen_cmd.command.is_some());
+        assert_eq!(gen_cmd.capture.as_deref(), Some("commit_message"));
+        // Migrated hooks have capture_mode: Both
+        let test_cmd = pipeline.iter().find(|c| c.name == "test").unwrap();
+        assert!(matches!(test_cmd.capture_mode, Some(CaptureMode::Both)));
+    }
+
+    #[test]
+    fn test_migrate_custom_provider() {
+        let json = r#"{
+            "generate": {"provider": {"command": "my-ai", "args": ["--prompt", "{{ prompt }}"]}},
+            "pre_push": []
+        }"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        let pipeline = migrate_to_pipeline(&config).unwrap();
+        let gen_cmd = pipeline.iter().find(|c| c.name == "generate").unwrap();
+        assert_eq!(gen_cmd.command.as_deref(), Some("my-ai"));
+    }
+
+    #[test]
+    fn test_migrate_codex_provider() {
+        let json = r#"{"generate": {"provider": "codex"}, "pre_push": []}"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        let pipeline = migrate_to_pipeline(&config).unwrap();
+        let gen_cmd = pipeline.iter().find(|c| c.name == "generate").unwrap();
+        assert_eq!(gen_cmd.command.as_deref(), Some("codex"));
+        assert!(gen_cmd.args.as_ref().unwrap().contains(&"exec".to_string()));
+    }
+
+    #[test]
+    fn test_migrate_default_provider() {
+        let json = r#"{"pre_push": [{"name": "lint", "run": "cargo clippy"}]}"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        let pipeline = migrate_to_pipeline(&config).unwrap();
+        let gen_cmd = pipeline.iter().find(|c| c.name == "generate").unwrap();
+        assert_eq!(gen_cmd.command.as_deref(), Some("claude")); // default
+    }
+
+    #[test]
+    fn test_migrate_ordering() {
+        let json = r#"{
+            "pre_push": [{"name": "test", "run": "cargo test"}],
+            "after_push": [{"name": "notify", "run": "echo done"}]
+        }"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        let pipeline = migrate_to_pipeline(&config).unwrap();
+        let names: Vec<&str> = pipeline.iter().map(|c| c.name.as_str()).collect();
+        // stash, pull, unstash, stage come before pre_push
+        let stash_idx = names.iter().position(|n| *n == "stash").unwrap();
+        let test_idx = names.iter().position(|n| *n == "test").unwrap();
+        let gen_idx = names.iter().position(|n| *n == "generate").unwrap();
+        let notify_idx = names.iter().position(|n| *n == "notify").unwrap();
+        assert!(stash_idx < test_idx);
+        assert!(test_idx < gen_idx);
+        assert!(gen_idx < notify_idx);
+    }
+
+    #[test]
+    fn test_migrate_ollama_provider() {
+        let json = r#"{"generate": {"provider": "ollama"}, "pre_push": []}"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        let pipeline = migrate_to_pipeline(&config).unwrap();
+        let gen_cmd = pipeline.iter().find(|c| c.name == "generate").unwrap();
+        assert_eq!(gen_cmd.command.as_deref(), Some("ollama"));
+        assert!(gen_cmd.args.as_ref().unwrap().contains(&"run".to_string()));
+        assert!(
+            gen_cmd
+                .args
+                .as_ref()
+                .unwrap()
+                .contains(&"llama3".to_string())
+        );
+    }
+
+    #[test]
+    fn test_migrate_unknown_provider_fails() {
+        let json = r#"{"generate": {"provider": "unknown-tool"}, "pre_push": []}"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        let result = migrate_to_pipeline(&config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Unknown provider"));
+    }
+
+    #[test]
+    fn test_migrate_commit_has_capture_after() {
+        let json = r#"{"pre_push": []}"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        let pipeline = migrate_to_pipeline(&config).unwrap();
+        let commit = pipeline.iter().find(|c| c.name == "commit").unwrap();
+        let ca = commit.capture_after.as_ref().unwrap();
+        assert_eq!(ca.len(), 2);
+        assert!(ca.iter().any(|e| e.name == "commit_hash"));
+        assert!(ca.iter().any(|e| e.name == "commit_summary"));
+    }
+
+    #[test]
+    fn test_migrate_push_has_on_error() {
+        let json = r#"{"pre_push": []}"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        let pipeline = migrate_to_pipeline(&config).unwrap();
+        let push = pipeline.iter().find(|c| c.name == "push").unwrap();
+        assert!(push.on_error.is_some());
+    }
+
+    #[test]
+    fn test_migrate_preserves_existing_capture_mode() {
+        let json = r#"{
+            "pre_push": [{"name": "test", "run": "cargo test", "capture_mode": "stdout"}],
+            "after_push": []
+        }"#;
+        let config: AppConfig = serde_json::from_str(json).unwrap();
+        let pipeline = migrate_to_pipeline(&config).unwrap();
+        let test_cmd = pipeline.iter().find(|c| c.name == "test").unwrap();
+        assert!(matches!(test_cmd.capture_mode, Some(CaptureMode::Stdout)));
+    }
+
+    #[test]
+    fn test_migrate_load_wires_pipeline() {
+        let dir = tempfile::tempdir().unwrap();
+        let json = r#"{"pre_push": [{"name": "test", "run": "echo hi"}], "after_push": []}"#;
+        std::fs::write(dir.path().join(CONFIG_FILE), json).unwrap();
+
+        let config = load(dir.path(), "main").unwrap();
+        // Migration should have produced a pipeline
+        assert!(config.pipeline.is_some());
+        let pipeline = config.pipeline.unwrap();
+        assert!(pipeline.iter().any(|c| c.name == "stash"));
+        assert!(pipeline.iter().any(|c| c.name == "generate"));
+        assert!(pipeline.iter().any(|c| c.name == "test"));
+    }
+
+    #[test]
+    fn test_no_migrate_when_pipeline_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let json = r#"{
+            "pipeline": [{"name": "custom", "run": "echo hello"}],
+            "pre_push": [{"name": "test", "run": "cargo test"}]
+        }"#;
+        std::fs::write(dir.path().join(CONFIG_FILE), json).unwrap();
+
+        let config = load(dir.path(), "main").unwrap();
+        // Should NOT have migrated; pipeline stays as-is
+        let pipeline = config.pipeline.unwrap();
+        assert_eq!(pipeline.len(), 1);
+        assert_eq!(pipeline[0].name, "custom");
     }
 }

@@ -1,21 +1,23 @@
 mod config;
 mod context;
-mod diff;
 mod generate;
 mod git;
-mod hooks;
+mod pipeline;
 mod preflight;
-mod pull;
-mod push;
-mod stage_commit;
-mod stash;
-mod submodule;
 mod template;
+mod vars;
 
 use anyhow::{Result, bail};
 use clap::Parser;
 use config::ProviderConfig;
-use context::CliFlags;
+
+fn parse_var_override(s: &str) -> Result<(String, String), String> {
+    let parts: Vec<&str> = s.splitn(2, '=').collect();
+    if parts.len() != 2 {
+        return Err(format!("Invalid --var format: '{s}'. Expected key=value."));
+    }
+    Ok((parts[0].to_string(), parts[1].to_string()))
+}
 
 #[derive(Parser)]
 #[command(
@@ -94,6 +96,14 @@ struct Cli {
     /// Show the merged config (global + local + branch) and exit
     #[arg(long)]
     show_config: bool,
+
+    /// Skip specific pipeline commands by name (repeatable)
+    #[arg(long, action = clap::ArgAction::Append)]
+    skip: Vec<String>,
+
+    /// Override or add template variables (repeatable, format: key=value)
+    #[arg(long = "var", value_parser = parse_var_override, action = clap::ArgAction::Append)]
+    var_overrides: Vec<(String, String)>,
 }
 
 fn main() -> Result<()> {
@@ -119,101 +129,73 @@ fn main() -> Result<()> {
 
     // Apply --provider CLI override
     if let Some(ref provider_name) = cli.provider {
-        app_config.generate.provider = ProviderConfig::Preset(provider_name.clone());
+        app_config.generate.provider = Some(ProviderConfig::Preset(provider_name.clone()));
         // Reset structured_output to preset default
         app_config.generate.structured_output = None;
     }
 
-    let ctx = context::Context {
-        preflight: preflight_result,
-        cli: CliFlags {
-            stage_all: cli.stage_all,
-            no_push: cli.no_push,
-            no_pull: cli.no_pull,
-            no_stash: cli.no_stash,
-            no_submodules: cli.no_submodules,
-            no_pre_push: cli.no_pre_push,
-            no_after_push: cli.no_after_push,
-            no_hooks: cli.no_hooks,
-            no_generate: cli.no_generate,
-            confirm: cli.confirm,
-            dry_run: cli.dry_run,
-            message: cli.message,
-            force: cli.force,
-            rebase: cli.rebase,
-            provider_override: cli.provider,
-        },
-        app_config,
+    // Build CLI flags
+    let mut cli_flags = context::CliFlags {
+        stage_all: cli.stage_all,
+        no_push: cli.no_push,
+        no_pull: cli.no_pull,
+        no_stash: cli.no_stash,
+        no_submodules: cli.no_submodules,
+        no_pre_push: cli.no_pre_push,
+        no_after_push: cli.no_after_push,
+        no_hooks: cli.no_hooks,
+        no_generate: cli.no_generate,
+        confirm: cli.confirm,
+        dry_run: cli.dry_run,
+        message: cli.message,
+        force: cli.force,
+        rebase: cli.rebase,
+        provider_override: cli.provider,
+        skip: cli.skip,
+        var_overrides: cli.var_overrides,
     };
 
-    // Phase 3: Stash (protect dirty tree before pull)
-    let stash_result = stash::auto_stash(&ctx)?;
+    // Apply deprecation flags (--no-pull -> --skip pull, etc.)
+    context::apply_deprecation_flags(&mut cli_flags);
 
-    // Phase 4: Pull
-    let pull_outcome = pull::run(&ctx)?;
+    // Phase 3: Build template vars (static built-ins + user vars + CLI overrides)
+    let mut template_vars = vars::build_static_vars(
+        &preflight_result.branch,
+        &preflight_result.remote,
+        &git::remote_url(&preflight_result.remote),
+        preflight_result.repo_root.to_str().unwrap_or("."),
+        &app_config.generate,
+    );
 
-    // Phase 5: Submodule Sync (after pull so we have latest .gitmodules)
-    submodule::sync(&ctx)?;
-
-    // Phase 6: Unstash (restore changes for commit)
-    stash::auto_unstash(&stash_result)?;
-
-    // Phase 7: Pre-push hooks
-    if !ctx.cli.no_hooks && !ctx.cli.no_pre_push && !ctx.app_config.pre_push.is_empty() {
-        let mut template_ctx = hooks::TemplateContext {
-            branch: ctx.preflight.branch.clone(),
-            remote: ctx.preflight.remote.clone(),
-            commit_hash: git::run_git(&["rev-parse", "HEAD"]).unwrap_or_else(|_| {
-                eprintln!("[hooks] Warning: could not resolve HEAD commit hash");
-                String::new()
-            }),
-            commit_summary: String::new(),
-            command_outputs: std::collections::HashMap::new(),
-        };
-        hooks::run_phase(
-            hooks::HookPhase::PrePush,
-            &ctx.app_config.pre_push,
-            &mut template_ctx,
-            ctx.cli.dry_run,
-            ctx.cli.force,
-        )?;
+    // Add user vars from config
+    for (k, v) in &app_config.vars {
+        template_vars.insert(k.clone(), v.clone());
     }
 
-    // Phase 8: Stage & Commit
-    stage_commit::run(&ctx, &pull_outcome)?;
+    // Apply --var CLI overrides
+    context::apply_var_overrides(&mut template_vars, &cli_flags.var_overrides)?;
 
-    // Phase 9: Push (submodules first, then parent)
-    push::run(&ctx)?;
-
-    // Phase 10: After-push hooks (only if push actually happened)
-    if !ctx.cli.no_push
-        && !ctx.cli.no_hooks
-        && !ctx.cli.no_after_push
-        && !ctx.app_config.after_push.is_empty()
-    {
-        let mut template_ctx = hooks::TemplateContext {
-            branch: ctx.preflight.branch.clone(),
-            remote: ctx.preflight.remote.clone(),
-            commit_hash: git::run_git(&["rev-parse", "HEAD"]).unwrap_or_else(|_| {
-                eprintln!("[hooks] Warning: could not resolve HEAD commit hash");
-                String::new()
-            }),
-            commit_summary: git::run_git(&["log", "-1", "--format=%s"]).unwrap_or_else(|_| {
-                eprintln!("[hooks] Warning: could not resolve commit summary");
-                String::new()
-            }),
-            command_outputs: std::collections::HashMap::new(),
-        };
-        if let Err(e) = hooks::run_phase(
-            hooks::HookPhase::AfterPush,
-            &ctx.app_config.after_push,
-            &mut template_ctx,
-            ctx.cli.dry_run,
-            ctx.cli.force,
-        ) {
-            eprintln!("[after_push] Warning: {e}");
-        }
+    // Pre-register -m message as commit_message
+    if let Some(ref msg) = cli_flags.message {
+        template_vars.insert("commit_message".to_string(), msg.clone());
     }
+
+    // Phase 4: Resolve pipeline
+    let pipeline_commands = app_config.pipeline.unwrap_or_default();
+
+    // Phase 5: Create lazy var resolver
+    let mut lazy_resolver = vars::LazyVarResolver::new(app_config.generate.max_diff_bytes);
+
+    // Phase 6: Execute pipeline
+    pipeline::run_pipeline(
+        &pipeline_commands,
+        &mut template_vars,
+        &mut lazy_resolver,
+        &cli_flags.skip,
+        cli_flags.dry_run,
+        cli_flags.force,
+        cli_flags.confirm,
+    )?;
 
     Ok(())
 }
