@@ -18,6 +18,14 @@ use clap::Parser;
 use config::ProviderConfig;
 use context::CliFlags;
 
+fn parse_var_override(s: &str) -> Result<(String, String), String> {
+    let parts: Vec<&str> = s.splitn(2, '=').collect();
+    if parts.len() != 2 {
+        return Err(format!("Invalid --var format: '{s}'. Expected key=value."));
+    }
+    Ok((parts[0].to_string(), parts[1].to_string()))
+}
+
 #[derive(Parser)]
 #[command(
     name = "auto-push",
@@ -95,6 +103,14 @@ struct Cli {
     /// Show the merged config (global + local + branch) and exit
     #[arg(long)]
     show_config: bool,
+
+    /// Skip specific pipeline commands by name (repeatable)
+    #[arg(long, action = clap::ArgAction::Append)]
+    skip: Vec<String>,
+
+    /// Override or add template variables (repeatable, format: key=value)
+    #[arg(long = "var", value_parser = parse_var_override, action = clap::ArgAction::Append)]
+    var_overrides: Vec<(String, String)>,
 }
 
 fn main() -> Result<()> {
@@ -143,6 +159,8 @@ fn main() -> Result<()> {
             force: cli.force,
             rebase: cli.rebase,
             provider_override: cli.provider,
+            skip: cli.skip,
+            var_overrides: cli.var_overrides,
         },
         app_config,
     };

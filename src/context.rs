@@ -1,4 +1,5 @@
 use crate::config::AppConfig;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 pub struct PreflightResult {
@@ -32,12 +33,54 @@ pub struct CliFlags {
     pub rebase: bool,
     #[allow(dead_code)]
     pub provider_override: Option<String>,
+    pub skip: Vec<String>,
+    #[allow(dead_code)] // wired in Task 9
+    pub var_overrides: Vec<(String, String)>,
 }
 
 pub struct Context {
     pub preflight: PreflightResult,
     pub cli: CliFlags,
     pub app_config: AppConfig,
+}
+
+/// Map deprecated boolean flags to --skip entries and print warnings.
+#[allow(dead_code)] // called from main.rs in Task 9
+pub fn apply_deprecation_flags(cli: &mut CliFlags) {
+    let mappings = [
+        (cli.no_pull, "pull", "--no-pull"),
+        (cli.no_push, "push", "--no-push"),
+        (cli.no_generate, "generate", "--no-generate"),
+        (cli.no_stash, "stash", "--no-stash"),
+        (cli.no_submodules, "submodules", "--no-submodules"),
+    ];
+    for (flag, skip_name, flag_name) in &mappings {
+        if *flag && !cli.skip.contains(&skip_name.to_string()) {
+            eprintln!("Warning: {flag_name} is deprecated. Use --skip {skip_name} instead.");
+            cli.skip.push(skip_name.to_string());
+        }
+    }
+    if cli.rebase {
+        eprintln!(
+            "Warning: --rebase is deprecated. Use 'git pull --rebase' in your pipeline instead."
+        );
+    }
+}
+
+/// Apply --var overrides to a vars map. Rejects built-in overrides.
+#[allow(dead_code)] // called from main.rs in Task 9
+pub fn apply_var_overrides(
+    vars: &mut HashMap<String, String>,
+    overrides: &[(String, String)],
+) -> anyhow::Result<()> {
+    let builtins = crate::vars::builtin_var_names();
+    for (key, value) in overrides {
+        if builtins.contains(key) {
+            anyhow::bail!("Cannot override built-in variable '{key}' with --var.");
+        }
+        vars.insert(key.clone(), value.clone());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -74,6 +117,8 @@ mod tests {
             force: false,
             rebase: false,
             provider_override: None,
+            skip: vec![],
+            var_overrides: vec![],
         }
     }
 
@@ -107,8 +152,44 @@ mod tests {
             force: false,
             rebase: false,
             provider_override: None,
+            skip: vec![],
+            var_overrides: vec![],
         };
         assert!(!cli.no_after_push);
         assert!(!cli.no_hooks);
+    }
+
+    #[test]
+    fn test_apply_deprecation_flags() {
+        let mut cli = dummy_cli();
+        cli.no_pull = true;
+        cli.no_push = true;
+        apply_deprecation_flags(&mut cli);
+        assert!(cli.skip.contains(&"pull".to_string()));
+        assert!(cli.skip.contains(&"push".to_string()));
+    }
+
+    #[test]
+    fn test_apply_deprecation_flags_no_duplicates() {
+        let mut cli = dummy_cli();
+        cli.no_pull = true;
+        cli.skip.push("pull".to_string());
+        apply_deprecation_flags(&mut cli);
+        assert_eq!(cli.skip.iter().filter(|s| *s == "pull").count(), 1);
+    }
+
+    #[test]
+    fn test_apply_var_overrides() {
+        let mut vars = std::collections::HashMap::new();
+        vars.insert("team".to_string(), "original".to_string());
+        apply_var_overrides(&mut vars, &[("team".to_string(), "override".to_string())]).unwrap();
+        assert_eq!(vars.get("team").unwrap(), "override");
+    }
+
+    #[test]
+    fn test_apply_var_overrides_builtin_rejected() {
+        let mut vars = std::collections::HashMap::new();
+        let result = apply_var_overrides(&mut vars, &[("branch".to_string(), "x".to_string())]);
+        assert!(result.is_err());
     }
 }
