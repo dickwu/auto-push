@@ -117,7 +117,15 @@ pub fn scan_template_expressions(input: &str) -> Vec<(usize, usize, &str)> {
                     continue;
                 }
                 if in_regex && bytes[i] == b'/' {
-                    let escaped = i > 0 && bytes[i - 1] == b'\\';
+                    let escaped = {
+                        let mut count = 0usize;
+                        let mut j = i;
+                        while j > 0 && bytes[j - 1] == b'\\' {
+                            count += 1;
+                            j -= 1;
+                        }
+                        count % 2 == 1
+                    };
                     if !escaped {
                         in_regex = false;
                         i += 1;
@@ -264,5 +272,13 @@ mod tests {
     fn test_scan_unclosed_left_asis() {
         let spans = scan_template_expressions("{{ unclosed");
         assert_eq!(spans.len(), 0);
+    }
+
+    #[test]
+    fn test_scan_regex_double_backslash_before_slash() {
+        // \\/ means literal backslash then closing slash — regex body should close
+        let spans = scan_template_expressions("{{ val:/foo\\\\/ }}");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].2, "val:/foo\\\\/");
     }
 }
