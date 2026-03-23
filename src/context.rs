@@ -34,7 +34,6 @@ pub struct CliFlags {
     #[allow(dead_code)]
     pub provider_override: Option<String>,
     pub skip: Vec<String>,
-    #[allow(dead_code)] // wired in Task 9
     pub var_overrides: Vec<(String, String)>,
 }
 
@@ -45,7 +44,6 @@ pub struct Context {
 }
 
 /// Map deprecated boolean flags to --skip entries and print warnings.
-#[allow(dead_code)] // called from main.rs in Task 9
 pub fn apply_deprecation_flags(cli: &mut CliFlags) {
     let mappings = [
         (cli.no_pull, "pull", "--no-pull"),
@@ -68,7 +66,6 @@ pub fn apply_deprecation_flags(cli: &mut CliFlags) {
 }
 
 /// Apply --var overrides to a vars map. Rejects built-in overrides.
-#[allow(dead_code)] // called from main.rs in Task 9
 pub fn apply_var_overrides(
     vars: &mut HashMap<String, String>,
     overrides: &[(String, String)],

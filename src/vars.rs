@@ -328,7 +328,6 @@ pub struct LazyVarResolver {
     dirty: bool,
 }
 
-#[allow(dead_code)] // main.rs integration in Task 9; used by run_pipeline
 impl LazyVarResolver {
     pub fn new(max_diff_bytes: usize) -> Self {
         Self {
@@ -413,7 +412,6 @@ impl LazyVarResolver {
 // ---------------------------------------------------------------------------
 
 /// Build static built-in vars from preflight results and config.
-#[allow(dead_code)] // main.rs integration in Task 9
 pub fn build_static_vars(
     branch: &str,
     remote: &str,

@@ -288,7 +288,6 @@ fn execute_command(cmd: &str, interactive: bool) -> Result<(String, bool)> {
 
 /// Execute a shell command with separate stdout and stderr pipes.
 /// stdout is captured and returned. stderr is streamed to terminal only.
-#[allow(dead_code)] // Called from run_pipeline; main.rs integration in Task 9
 fn execute_command_split(cmd: &str, interactive: bool) -> Result<(String, bool)> {
     use std::io::{BufRead, BufReader};
     use std::process::{Command, Stdio};
@@ -354,7 +353,6 @@ fn execute_command_split(cmd: &str, interactive: bool) -> Result<(String, bool)>
 
 /// Execute a command with args directly (no shell), separate stdout/stderr.
 /// stdout is captured and returned. stderr is streamed to terminal only.
-#[allow(dead_code)] // Called from run_pipeline; main.rs integration in Task 9
 fn execute_argv(command: &str, args: &[String], interactive: bool) -> Result<(String, bool)> {
     use std::io::{BufRead, BufReader};
     use std::process::{Command, Stdio};
@@ -430,7 +428,6 @@ fn execute_argv(command: &str, args: &[String], interactive: bool) -> Result<(St
 /// - `dry_run`: print resolved commands without executing
 /// - `force`: auto-accept all confirm prompts
 /// - `confirm_all`: prompt before each command (from `--confirm`)
-#[allow(dead_code)] // main.rs integration in Task 9
 pub fn run_pipeline(
     commands: &[PipelineCommand],
     template_vars: &mut HashMap<String, String>,
@@ -554,7 +551,6 @@ pub fn run_pipeline(
 }
 
 /// Resolve a pipeline command to its display string for logging.
-#[allow(dead_code)] // Called from run_pipeline; main.rs integration in Task 9
 fn resolve_command_display(cmd: &PipelineCommand, vars: &HashMap<String, String>) -> String {
     if let Some(ref run_str) = cmd.run {
         template::render_shell(run_str, vars)
@@ -575,7 +571,6 @@ fn resolve_command_display(cmd: &PipelineCommand, vars: &HashMap<String, String>
 }
 
 /// Handle confirm prompt logic. Returns true if execution should proceed.
-#[allow(dead_code)] // Called from run_pipeline; main.rs integration in Task 9
 fn handle_confirm(
     cmd: &PipelineCommand,
     vars: &HashMap<String, String>,
@@ -612,7 +607,6 @@ fn handle_confirm(
 }
 
 /// Execute a single pipeline command using the appropriate method.
-#[allow(dead_code)] // Called from run_pipeline; main.rs integration in Task 9
 fn execute_pipeline_command(
     cmd: &PipelineCommand,
     vars: &HashMap<String, String>,
