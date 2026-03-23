@@ -1,6 +1,7 @@
-mod claude;
+mod config;
 mod context;
 mod diff;
+mod generate;
 mod git;
 mod hooks;
 mod preflight;
@@ -9,11 +10,12 @@ mod push;
 mod stage_commit;
 mod stash;
 mod submodule;
+mod template;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::Parser;
+use config::ProviderConfig;
 use context::CliFlags;
-use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(
@@ -21,11 +23,12 @@ use std::path::PathBuf;
     version,
     about = "Automate your git workflow: pull, stage, generate AI commit messages, and push — all in one command",
     long_about = "auto-push streamlines your entire git workflow into a single command.\n\n\
-        It pulls the latest changes, stages your work, uses the local Claude CLI to \
+        It pulls the latest changes, stages your work, uses an AI CLI to \
         analyze your diff and generate meaningful commit messages, then pushes to the remote.\n\n\
         Supports hunk-level commit splitting, submodule handling, auto-stash, \
         rebase, and intelligent push recovery.\n\n\
-        Requires: git, claude (Claude Code CLI, authenticated)"
+        Supports multiple AI providers: Claude (default), Codex, Ollama, or any custom CLI.\n\n\
+        Requires: git, and an AI CLI (claude, codex, or ollama)"
 )]
 struct Cli {
     /// Stage all changes before committing (enabled by default)
@@ -60,6 +63,10 @@ struct Cli {
     #[arg(long)]
     no_hooks: bool,
 
+    /// Skip AI generation (requires -m to provide a commit message)
+    #[arg(long)]
+    no_generate: bool,
+
     /// Review and confirm before each action
     #[arg(short = 'c', long)]
     confirm: bool,
@@ -68,7 +75,7 @@ struct Cli {
     #[arg(short = 'n', long)]
     dry_run: bool,
 
-    /// Use a custom commit message instead of generating one with Claude
+    /// Use a custom commit message instead of generating one with AI
     #[arg(short = 'm', long)]
     message: Option<String>,
 
@@ -80,13 +87,13 @@ struct Cli {
     #[arg(short = 'r', long)]
     rebase: bool,
 
-    /// Generate a .auto-push.json config file in the repo root and exit
+    /// Override the AI provider for this run (e.g. --provider codex)
     #[arg(long)]
-    init_hooks: bool,
+    provider: Option<String>,
 
-    /// Show the current hook commands and exit
+    /// Show the merged config (global + local + branch) and exit
     #[arg(long)]
-    show_hooks: bool,
+    show_config: bool,
 }
 
 fn main() -> Result<()> {
@@ -94,20 +101,28 @@ fn main() -> Result<()> {
 
     println!("auto-push v{}", env!("CARGO_PKG_VERSION"));
 
-    if cli.init_hooks {
-        git::ensure_git_repo()?;
-        let root = PathBuf::from(git::repo_root()?);
-        return hooks::init_config(&root);
-    }
-
-    if cli.show_hooks {
-        git::ensure_git_repo()?;
-        let root = PathBuf::from(git::repo_root()?);
-        return hooks::show_config(&root);
-    }
-
     // Phase 1: Preflight
     let preflight_result = preflight::check()?;
+
+    // Show config and exit
+    if cli.show_config {
+        return config::show_config(&preflight_result.repo_root, &preflight_result.branch);
+    }
+
+    // Validate --no-generate requires -m
+    if cli.no_generate && cli.message.is_none() {
+        bail!("No commit message: use -m to provide one or remove --no-generate.");
+    }
+
+    // Phase 2: Load config (auto-inits if missing)
+    let mut app_config = config::load(&preflight_result.repo_root, &preflight_result.branch)?;
+
+    // Apply --provider CLI override
+    if let Some(ref provider_name) = cli.provider {
+        app_config.generate.provider = ProviderConfig::Preset(provider_name.clone());
+        // Reset structured_output to preset default
+        app_config.generate.structured_output = None;
+    }
 
     let ctx = context::Context {
         preflight: preflight_result,
@@ -120,37 +135,31 @@ fn main() -> Result<()> {
             no_pre_push: cli.no_pre_push,
             no_after_push: cli.no_after_push,
             no_hooks: cli.no_hooks,
+            no_generate: cli.no_generate,
             confirm: cli.confirm,
             dry_run: cli.dry_run,
             message: cli.message,
             force: cli.force,
             rebase: cli.rebase,
+            provider_override: cli.provider,
         },
+        app_config,
     };
 
-    // Phase 2: Stash (protect dirty tree before pull)
+    // Phase 3: Stash (protect dirty tree before pull)
     let stash_result = stash::auto_stash(&ctx)?;
 
-    // Phase 3: Pull
+    // Phase 4: Pull
     let pull_outcome = pull::run(&ctx)?;
 
-    // Phase 4: Submodule Sync (after pull so we have latest .gitmodules)
+    // Phase 5: Submodule Sync (after pull so we have latest .gitmodules)
     submodule::sync(&ctx)?;
 
-    // Phase 5: Unstash (restore changes for commit)
+    // Phase 6: Unstash (restore changes for commit)
     stash::auto_unstash(&stash_result)?;
 
-    // Phase 6: Pre-push hooks
-    let hooks_config = if !ctx.cli.no_hooks {
-        hooks::load_config(&ctx.preflight.repo_root)?
-    } else {
-        None
-    };
-
-    if !ctx.cli.no_hooks
-        && !ctx.cli.no_pre_push
-        && let Some(ref config) = hooks_config
-    {
+    // Phase 7: Pre-push hooks
+    if !ctx.cli.no_hooks && !ctx.cli.no_pre_push && !ctx.app_config.pre_push.is_empty() {
         let mut template_ctx = hooks::TemplateContext {
             branch: ctx.preflight.branch.clone(),
             remote: ctx.preflight.remote.clone(),
@@ -158,29 +167,29 @@ fn main() -> Result<()> {
                 eprintln!("[hooks] Warning: could not resolve HEAD commit hash");
                 String::new()
             }),
-            commit_summary: String::new(), // not yet committed
+            commit_summary: String::new(),
             command_outputs: std::collections::HashMap::new(),
         };
         hooks::run_phase(
             hooks::HookPhase::PrePush,
-            config,
+            &ctx.app_config.pre_push,
             &mut template_ctx,
             ctx.cli.dry_run,
             ctx.cli.force,
         )?;
     }
 
-    // Phase 7: Stage & Commit
+    // Phase 8: Stage & Commit
     stage_commit::run(&ctx, &pull_outcome)?;
 
-    // Phase 8: Push (submodules first, then parent)
+    // Phase 9: Push (submodules first, then parent)
     push::run(&ctx)?;
 
-    // Phase 9: After-push hooks (only if push actually happened)
+    // Phase 10: After-push hooks (only if push actually happened)
     if !ctx.cli.no_push
         && !ctx.cli.no_hooks
         && !ctx.cli.no_after_push
-        && let Some(ref config) = hooks_config
+        && !ctx.app_config.after_push.is_empty()
     {
         let mut template_ctx = hooks::TemplateContext {
             branch: ctx.preflight.branch.clone(),
@@ -197,7 +206,7 @@ fn main() -> Result<()> {
         };
         if let Err(e) = hooks::run_phase(
             hooks::HookPhase::AfterPush,
-            config,
+            &ctx.app_config.after_push,
             &mut template_ctx,
             ctx.cli.dry_run,
             ctx.cli.force,

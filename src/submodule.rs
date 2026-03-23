@@ -1,5 +1,5 @@
-use crate::claude;
 use crate::context::Context;
+use crate::generate;
 use crate::git;
 use anyhow::{Result, bail};
 
@@ -95,20 +95,21 @@ fn process_dirty_submodule(ctx: &Context, path: &str) -> Result<()> {
         return Ok(());
     }
 
-    // Generate commit message via Claude, fall back to a sensible default
+    // Generate commit message via AI provider, fall back to a sensible default
     let diff = {
         let (d, _, _) = git::run_git_check(&["-C", path, "diff", "--cached"])?;
         d
     };
 
+    let gen_config = &ctx.app_config.generate;
     let commit_message = if diff.is_empty() || ctx.cli.dry_run {
         "chore: update submodule changes".to_string()
     } else {
-        match claude::generate_commit_message(&diff, false) {
+        match generate::generate_commit_message(&diff, false, gen_config) {
             Ok(msg) => msg,
             Err(e) => {
                 eprintln!(
-                    "[submodule] {path}: Claude commit message generation failed ({e}), using default"
+                    "[submodule] {path}: commit message generation failed ({e}), using default"
                 );
                 "chore: update submodule changes".to_string()
             }

@@ -1,5 +1,5 @@
-use crate::claude;
 use crate::context::Context;
+use crate::generate;
 use crate::git;
 use anyhow::{Result, bail};
 
@@ -69,20 +69,22 @@ fn resolve_merge_conflicts(ctx: &Context) -> Result<()> {
 
     println!("[pull] Merge conflicts in {} file(s)", conflict_files.len());
 
-    claude::resolve_conflicts(&conflict_files, ctx.cli.force)?;
+    let gen_config = &ctx.app_config.generate;
+    generate::resolve_conflicts(&conflict_files, ctx.cli.force, gen_config)?;
 
     if git::has_conflicts()? {
-        eprintln!("[pull] Conflicts remain after Claude resolution. Aborting merge.");
+        eprintln!("[pull] Conflicts remain after resolution. Aborting merge.");
         git::abort_merge()?;
         bail!("unresolved merge conflicts -- please resolve manually");
     }
 
-    println!("[pull] All conflicts resolved by Claude");
+    println!("[pull] All conflicts resolved");
     Ok(())
 }
 
 fn resolve_rebase_conflicts(ctx: &Context) -> Result<()> {
     const MAX_REBASE_ITERATIONS: usize = 10;
+    let gen_config = &ctx.app_config.generate;
 
     for iteration in 0..MAX_REBASE_ITERATIONS {
         let conflict_files = git::conflict_files()?;
@@ -96,17 +98,17 @@ fn resolve_rebase_conflicts(ctx: &Context) -> Result<()> {
             conflict_files.len()
         );
 
-        claude::resolve_conflicts(&conflict_files, ctx.cli.force)?;
+        generate::resolve_conflicts(&conflict_files, ctx.cli.force, gen_config)?;
 
         if git::has_conflicts()? {
-            eprintln!("[pull] Claude could not resolve rebase conflicts. Aborting rebase.");
+            eprintln!("[pull] Could not resolve rebase conflicts. Aborting rebase.");
             git::rebase_abort()?;
             bail!("unresolved rebase conflicts -- resolve manually or use merge-based pull");
         }
 
         let continued = git::rebase_continue()?;
         if continued {
-            println!("[pull] Rebase conflicts resolved by Claude");
+            println!("[pull] Rebase conflicts resolved");
             return Ok(());
         }
     }

@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**auto-push** is a Rust CLI tool that automates the git workflow: pull, stage, generate commit messages (via local `claude` CLI), commit, and push — all in one command.
+**auto-push** is a Rust CLI tool that automates the git workflow: pull, stage, generate commit messages (via configurable AI provider), commit, and push — all in one command.
 
-Requires: `git`, `gh` (GitHub CLI), `claude` (Claude Code CLI, authenticated).
+Requires: `git`, `gh` (GitHub CLI), and an AI CLI (`claude`, `codex`, `ollama`, or any custom CLI).
 
 ## Build & Development
 
@@ -26,19 +26,21 @@ cargo fmt -- --check         # Check formatting without modifying
 Rust binary crate with these modules:
 
 - `src/main.rs` — Entry point, CLI arg parsing (`clap` derive), orchestration flow
+- `src/config.rs` — Config types (`AppConfig`, `GenerateConfig`, `ProviderConfig`), global+local layering via `serde_json::Value` deep merge, auto-init on first run with provider detection and `.gitignore` management, per-branch overrides via `globset`, provider presets (claude/codex/ollama), `deny_unknown_fields`
+- `src/generate.rs` — AI provider dispatch with template-based args, style suffix injection into all prompts, structured output guard for non-Claude providers, configurable timeout, conflict resolution (Claude-only)
+- `src/template.rs` — Shared template engine: `render_shell` (shell-escaped, for hooks) and `render_raw` (no escaping, for provider args)
+- `src/hooks.rs` — Hook execution: pre_push/after_push command runner with confirm prompts, interactive mode, on_error handlers, output chaining via template variables
+- `src/context.rs` — CLI flags, runtime context, and `AppConfig`
 - `src/git.rs` — Git operations via `std::process::Command`, push via `gh` with `git push` fallback
-- `src/claude.rs` — Invokes local `claude -p` CLI with diff to generate commit messages; uses simple prompt for clean pulls, detailed prompt when merge occurred
-- `src/hooks.rs` — Unified hook system: pre_push/after_push commands via `.auto-push.json`, template engine with `{{ var }}` substitution and regex extraction, output chaining between commands, per-command `on_error` handlers, `confirm` prompts (auto-accepted with `--force` or no TTY), and `interactive` mode for full TTY passthrough
-- `src/context.rs` — CLI flags and runtime context
-- `src/push.rs` — Push logic with retry, protected branch detection, Claude-assisted error recovery
-- `src/pull.rs` — Pull with rebase support and conflict detection
-- `src/stage_commit.rs` — Staging, hunk-level commit splitting via Claude
+- `src/push.rs` — Push logic with retry, protected branch detection, AI-assisted error recovery
+- `src/pull.rs` — Pull with rebase support, conflict detection, provider-guarded conflict resolution
+- `src/stage_commit.rs` — Staging, hunk-level commit splitting via AI provider
 - `src/stash.rs` — Auto-stash/unstash around pull
-- `src/submodule.rs` — Submodule sync and push
+- `src/submodule.rs` — Submodule sync, commit message generation via provider, push
 - `src/preflight.rs` — Pre-run checks (git repo, remote, branch detection)
 - `src/diff.rs` — Diff parsing and hunk extraction
 
-Flow: `git pull` → detect changes → pre-push hooks → `git add -A` → get diff → call `claude` CLI → `git commit` → push → after-push hooks
+Flow: `git pull` → detect changes → load config (auto-init if missing) → pre-push hooks → `git add -A` → get diff → call AI provider → `git commit` → push → after-push hooks
 
 ## CI/CD
 

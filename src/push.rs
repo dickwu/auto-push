@@ -1,5 +1,5 @@
-use crate::claude;
 use crate::context::Context;
+use crate::generate;
 use crate::git;
 use anyhow::{Result, bail};
 use std::thread;
@@ -77,7 +77,7 @@ fn push_submodule(path: &str) -> Result<()> {
     Ok(())
 }
 
-fn push_repo(_ctx: &Context, remote: &str, branch: &str, set_upstream: bool) -> Result<()> {
+fn push_repo(ctx: &Context, remote: &str, branch: &str, set_upstream: bool) -> Result<()> {
     let result = git::push_to(remote, branch, set_upstream);
 
     match result {
@@ -118,18 +118,24 @@ fn push_repo(_ctx: &Context, remote: &str, branch: &str, set_upstream: bool) -> 
                 return Ok(());
             }
 
-            // Unknown error: ask Claude to diagnose
+            // Unknown error: ask AI provider to diagnose
             eprintln!("[push] Push failed: {msg}");
-            eprintln!("[push] Asking Claude to diagnose and fix...");
-            let remote_url = git::remote_url(remote);
-            let fix_commands = claude::fix_push_error(branch, &remote_url, &msg)?;
-            if fix_commands.starts_with("UNRECOVERABLE:") {
-                bail!("{fix_commands}");
+            let gen_config = &ctx.app_config.generate;
+            match generate::fix_push_error(branch, &git::remote_url(remote), &msg, gen_config) {
+                Ok(fix_commands) => {
+                    if fix_commands.starts_with("UNRECOVERABLE:") {
+                        bail!("{fix_commands}");
+                    }
+                    println!("[push] AI suggests:\n{fix_commands}\n");
+                    git::run_commands(&fix_commands)?;
+                    println!("[push] Pushed to {remote}/{branch} (via AI fix)");
+                    Ok(())
+                }
+                Err(e) => {
+                    eprintln!("[push] AI push recovery unavailable: {e}");
+                    bail!("Push failed: {msg}. Fix manually and push again.");
+                }
             }
-            println!("[push] Claude suggests:\n{fix_commands}\n");
-            git::run_commands(&fix_commands)?;
-            println!("[push] Pushed to {remote}/{branch} (via Claude fix)");
-            Ok(())
         }
     }
 }

@@ -1,3 +1,4 @@
+use crate::config::AppConfig;
 use std::path::PathBuf;
 
 pub struct PreflightResult {
@@ -23,16 +24,20 @@ pub struct CliFlags {
     pub no_pre_push: bool,
     pub no_after_push: bool,
     pub no_hooks: bool,
+    pub no_generate: bool,
     pub confirm: bool,
     pub dry_run: bool,
     pub message: Option<String>,
     pub force: bool,
     pub rebase: bool,
+    #[allow(dead_code)]
+    pub provider_override: Option<String>,
 }
 
 pub struct Context {
     pub preflight: PreflightResult,
     pub cli: CliFlags,
+    pub app_config: AppConfig,
 }
 
 #[cfg(test)]
@@ -62,11 +67,13 @@ mod tests {
             no_pre_push: false,
             no_after_push: false,
             no_hooks: false,
+            no_generate: false,
             confirm: false,
             dry_run: false,
             message: None,
             force: false,
             rebase: false,
+            provider_override: None,
         }
     }
 
@@ -75,6 +82,7 @@ mod tests {
         let ctx = Context {
             preflight: dummy_preflight(),
             cli: dummy_cli(),
+            app_config: AppConfig::default(),
         };
         assert_eq!(ctx.preflight.branch, "main");
         assert!(ctx.cli.stage_all);
@@ -92,11 +100,13 @@ mod tests {
             no_pre_push: false,
             no_after_push: false,
             no_hooks: false,
+            no_generate: false,
             confirm: false,
             dry_run: false,
             message: None,
             force: false,
             rebase: false,
+            provider_override: None,
         };
         assert!(!cli.no_after_push);
         assert!(!cli.no_hooks);

@@ -1,6 +1,6 @@
-use crate::claude;
 use crate::context::Context;
 use crate::diff;
+use crate::generate;
 use crate::git;
 use crate::pull::PullOutcome;
 use anyhow::{Result, bail};
@@ -26,8 +26,10 @@ pub fn run(ctx: &Context, pull_outcome: &PullOutcome) -> Result<()> {
 
     if let Some(ref msg) = ctx.cli.message.clone() {
         commit_manual(ctx, msg)?;
+    } else if ctx.cli.no_generate {
+        bail!("No commit message: use -m to provide one or remove --no-generate.");
     } else {
-        commit_with_claude(ctx, pull_outcome)?;
+        commit_with_ai(ctx, pull_outcome)?;
     }
 
     Ok(())
@@ -51,8 +53,8 @@ fn commit_manual(ctx: &Context, msg: &str) -> Result<()> {
     Ok(())
 }
 
-fn commit_with_claude(ctx: &Context, pull_outcome: &PullOutcome) -> Result<()> {
-    println!("\n[commit] Analyzing changes with Claude...");
+fn commit_with_ai(ctx: &Context, pull_outcome: &PullOutcome) -> Result<()> {
+    println!("\n[commit] Analyzing changes with AI...");
     let raw_diff = git::diff_for_commit()?;
     let hunks = diff::parse_diff(&raw_diff);
 
@@ -60,26 +62,26 @@ fn commit_with_claude(ctx: &Context, pull_outcome: &PullOutcome) -> Result<()> {
         bail!("no diff hunks found to commit");
     }
 
+    let gen_config = &ctx.app_config.generate;
+
     let commit_groups = if pull_outcome.needs_merge() {
-        let message = claude::generate_commit_message(&raw_diff, true)?;
+        let message = generate::generate_commit_message(&raw_diff, true, gen_config)?;
         let all_ids: Vec<usize> = hunks.iter().map(|h| h.id).collect();
-        vec![claude::CommitGroup {
+        vec![generate::CommitGroup {
             message,
             hunks: all_ids,
         }]
     } else {
         let formatted = diff::format_hunks_for_prompt(&hunks);
         let valid_ids: Vec<usize> = hunks.iter().map(|h| h.id).collect();
-        claude::plan_commits(&formatted, &valid_ids)?
+        generate::plan_commits(&formatted, &valid_ids, gen_config)?
     };
 
     let commit_groups = dedup_commit_groups(commit_groups);
-
-    // Ensure all hunks are covered — Claude may omit some IDs from its plan
     let commit_groups = ensure_all_hunks_covered(commit_groups, &hunks);
 
     let total = commit_groups.len();
-    println!("\n[commit] {total} commit(s) planned by Claude:\n");
+    println!("\n[commit] {total} commit(s) planned:\n");
 
     for (i, group) in commit_groups.iter().enumerate() {
         let files = resolve_files(&hunks, &group.hunks);
@@ -104,7 +106,7 @@ fn commit_with_claude(ctx: &Context, pull_outcome: &PullOutcome) -> Result<()> {
 /// Execute commit groups using hunk-level staging via `git apply --cached`.
 /// Falls back to file-level staging if patch application fails.
 fn commit_groups_with_hunks(
-    groups: &[claude::CommitGroup],
+    groups: &[generate::CommitGroup],
     all_hunks: &[diff::DiffHunk],
     total: usize,
 ) -> Result<()> {
@@ -153,8 +155,7 @@ fn commit_groups_with_hunks(
 }
 
 /// Ensure each hunk ID appears in only one commit group (the first that claims it).
-/// Drops any groups that end up with no hunks after dedup.
-fn dedup_commit_groups(groups: Vec<claude::CommitGroup>) -> Vec<claude::CommitGroup> {
+fn dedup_commit_groups(groups: Vec<generate::CommitGroup>) -> Vec<generate::CommitGroup> {
     let mut seen = HashSet::new();
     groups
         .into_iter()
@@ -167,7 +168,7 @@ fn dedup_commit_groups(groups: Vec<claude::CommitGroup>) -> Vec<claude::CommitGr
             if unique_hunks.is_empty() {
                 None
             } else {
-                Some(claude::CommitGroup {
+                Some(generate::CommitGroup {
                     message: group.message,
                     hunks: unique_hunks,
                 })
@@ -176,12 +177,11 @@ fn dedup_commit_groups(groups: Vec<claude::CommitGroup>) -> Vec<claude::CommitGr
         .collect()
 }
 
-/// If Claude's commit plan doesn't cover all hunk IDs, add a catch-all group
-/// for the remaining hunks so no changes are silently dropped.
+/// If the commit plan doesn't cover all hunk IDs, add a catch-all group.
 fn ensure_all_hunks_covered(
-    mut groups: Vec<claude::CommitGroup>,
+    mut groups: Vec<generate::CommitGroup>,
     all_hunks: &[diff::DiffHunk],
-) -> Vec<claude::CommitGroup> {
+) -> Vec<generate::CommitGroup> {
     let covered: HashSet<usize> = groups
         .iter()
         .flat_map(|g| g.hunks.iter().copied())
@@ -195,11 +195,11 @@ fn ensure_all_hunks_covered(
     if !missing.is_empty() {
         let files = resolve_files(all_hunks, &missing);
         eprintln!(
-            "[commit] Warning: Claude's plan missed {} hunk(s) in {}. Adding catch-all commit.",
+            "[commit] Warning: commit plan missed {} hunk(s) in {}. Adding catch-all commit.",
             missing.len(),
             files.join(", ")
         );
-        groups.push(claude::CommitGroup {
+        groups.push(generate::CommitGroup {
             message: "chore: stage remaining changes".to_string(),
             hunks: missing,
         });
@@ -208,7 +208,6 @@ fn ensure_all_hunks_covered(
     groups
 }
 
-/// Resolve hunk IDs to their unique file paths for display.
 fn resolve_files(all_hunks: &[diff::DiffHunk], hunk_ids: &[usize]) -> Vec<String> {
     let matched = hunk_ids
         .iter()
@@ -216,7 +215,6 @@ fn resolve_files(all_hunks: &[diff::DiffHunk], hunk_ids: &[usize]) -> Vec<String
     diff::files_from_hunks(matched)
 }
 
-/// Count the number of staged files from `git diff --cached --stat` output.
 pub fn count_staged_files(staged_stat: &str) -> usize {
     staged_stat
         .lines()
@@ -224,7 +222,6 @@ pub fn count_staged_files(staged_stat: &str) -> usize {
         .count()
 }
 
-/// Prompt the user with a yes/no question. Defaults to No.
 pub fn prompt_confirm(question: &str) -> Result<bool> {
     use std::io::{self, Write};
 
@@ -250,18 +247,17 @@ mod tests {
     #[test]
     fn test_count_staged_files_typical() {
         let stat = " src/main.rs | 10 ++++------\n src/lib.rs  |  5 ++---\n 2 files changed, 15 insertions(+), 5 deletions(-)";
-        // Two non-summary lines
         assert_eq!(count_staged_files(stat), 2);
     }
 
     #[test]
     fn test_dedup_commit_groups_removes_duplicates() {
         let groups = vec![
-            claude::CommitGroup {
+            generate::CommitGroup {
                 message: "feat: first".to_string(),
                 hunks: vec![1, 2, 3],
             },
-            claude::CommitGroup {
+            generate::CommitGroup {
                 message: "feat: second".to_string(),
                 hunks: vec![2, 4],
             },
@@ -269,7 +265,6 @@ mod tests {
         let deduped = dedup_commit_groups(groups);
         assert_eq!(deduped.len(), 2);
         assert_eq!(deduped[0].hunks, vec![1, 2, 3]);
-        // Hunk 2 was already claimed, only 4 remains
         assert_eq!(deduped[1].hunks, vec![4]);
     }
 
@@ -298,7 +293,7 @@ mod tests {
                 body: String::new(),
             },
         ];
-        let groups = vec![claude::CommitGroup {
+        let groups = vec![generate::CommitGroup {
             message: "feat: only covers hunk 1".to_string(),
             hunks: vec![1],
         }];
@@ -318,22 +313,22 @@ mod tests {
             hunk_header: "@@ -1 +1 @@".to_string(),
             body: String::new(),
         }];
-        let groups = vec![claude::CommitGroup {
+        let groups = vec![generate::CommitGroup {
             message: "feat: covers everything".to_string(),
             hunks: vec![1],
         }];
         let result = ensure_all_hunks_covered(groups, &hunks);
-        assert_eq!(result.len(), 1); // no catch-all added
+        assert_eq!(result.len(), 1);
     }
 
     #[test]
     fn test_dedup_commit_groups_drops_empty() {
         let groups = vec![
-            claude::CommitGroup {
+            generate::CommitGroup {
                 message: "feat: first".to_string(),
                 hunks: vec![1],
             },
-            claude::CommitGroup {
+            generate::CommitGroup {
                 message: "feat: second".to_string(),
                 hunks: vec![1],
             },
