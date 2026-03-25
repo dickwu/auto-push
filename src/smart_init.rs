@@ -464,7 +464,10 @@ pub fn validate_pipeline(steps: &[AiStep]) -> Result<()> {
 
 /// Convert AI steps into `PipelineCommand` values, adding capture directives
 /// for the Generate and Commit steps.
-pub fn convert_to_pipeline_commands(steps: &[AiStep]) -> Vec<PipelineCommand> {
+pub fn convert_to_pipeline_commands(
+    steps: &[AiStep],
+    provider: &ProviderConfig,
+) -> Vec<PipelineCommand> {
     steps
         .iter()
         .map(|step| {
@@ -489,15 +492,22 @@ pub fn convert_to_pipeline_commands(steps: &[AiStep]) -> Vec<PipelineCommand> {
                 None
             };
 
+            // Override the generate step with the correct provider config
+            // instead of trusting the AI's guess.
+            let (run, command, args) = if step.kind == StepKind::Generate {
+                generate_step_for_provider(provider)
+            } else {
+                (step.run.clone(), step.command.clone(), step.args.clone())
+            };
+
             PipelineCommand {
                 name: step.name.clone(),
-                run: step.run.clone(),
-                command: step.command.clone(),
-                args: step.args.clone(),
+                run,
+                command,
+                args,
                 description: step.description.clone(),
                 capture,
                 capture_after,
-                // Defaults for fields not carried from AiStep
                 on_error: None,
                 confirm: None,
                 interactive: false,
@@ -505,6 +515,70 @@ pub fn convert_to_pipeline_commands(steps: &[AiStep]) -> Vec<PipelineCommand> {
             }
         })
         .collect()
+}
+
+/// Build the correct run/command/args for the generate step based on the provider.
+fn generate_step_for_provider(
+    provider: &ProviderConfig,
+) -> (Option<String>, Option<String>, Option<Vec<String>>) {
+    match provider {
+        ProviderConfig::Preset(name) => match name.as_str() {
+            "claude" => (
+                None,
+                Some("claude".to_string()),
+                Some(vec![
+                    "-p".to_string(),
+                    "{{ diff }}".to_string(),
+                    "--system-prompt".to_string(),
+                    "{{ system_prompt }}".to_string(),
+                    "--output-format".to_string(),
+                    "text".to_string(),
+                    "--no-session-persistence".to_string(),
+                    "--tools".to_string(),
+                    String::new(),
+                ]),
+            ),
+            "codex" => (
+                None,
+                Some("codex".to_string()),
+                Some(vec![
+                    "exec".to_string(),
+                    "--color".to_string(),
+                    "never".to_string(),
+                    "{{ system_prompt }}\n\n{{ diff }}".to_string(),
+                ]),
+            ),
+            "ollama" => (
+                None,
+                Some("ollama".to_string()),
+                Some(vec![
+                    "run".to_string(),
+                    "llama3".to_string(),
+                    "{{ system_prompt }}\n\n{{ diff }}".to_string(),
+                ]),
+            ),
+            other => (
+                Some(format!(
+                    "{other} \"{{{{ system_prompt }}}}\" \"{{{{ diff }}}}\""
+                )),
+                None,
+                None,
+            ),
+        },
+        ProviderConfig::Custom(custom) => (
+            None,
+            Some(custom.command.clone()),
+            Some(
+                custom
+                    .args
+                    .iter()
+                    .map(|a| {
+                        a.replace("{{ prompt }}", "{{ diff }}")
+                    })
+                    .collect(),
+            ),
+        ),
+    }
 }
 
 /// Returns the 7 default core steps with sensible defaults.
@@ -912,7 +986,7 @@ pub fn run_smart_init(
     }
 
     // Phase 8: Convert to PipelineCommands and serialize
-    let pipeline_commands = convert_to_pipeline_commands(&steps);
+    let pipeline_commands = convert_to_pipeline_commands(&steps, provider);
     let config = serde_json::json!({
         "pipeline": pipeline_commands,
     });
@@ -1279,14 +1353,17 @@ RESPONSE
     #[test]
     fn test_convert_to_pipeline_commands() {
         let steps = make_core_steps();
-        let commands = convert_to_pipeline_commands(&steps);
+        let provider = ProviderConfig::Preset("claude".to_string());
+        let commands = convert_to_pipeline_commands(&steps, &provider);
 
         assert_eq!(commands.len(), 7);
 
-        // Generate step should capture commit_message
+        // Generate step should capture commit_message and use the correct provider
         let gen_cmd = commands.iter().find(|c| c.name == "generate").unwrap();
         assert_eq!(gen_cmd.capture.as_deref(), Some("commit_message"));
         assert!(gen_cmd.capture_after.is_none());
+        assert_eq!(gen_cmd.command.as_deref(), Some("claude"));
+        assert!(gen_cmd.run.is_none());
 
         // Commit step should have capture_after
         let commit_cmd = commands.iter().find(|c| c.name == "commit").unwrap();
@@ -1329,7 +1406,8 @@ RESPONSE
             },
         ];
 
-        let commands = convert_to_pipeline_commands(&steps);
+        let provider = ProviderConfig::Preset("claude".to_string());
+        let commands = convert_to_pipeline_commands(&steps, &provider);
 
         assert_eq!(commands[0].run.as_deref(), Some("echo hello"));
         assert!(commands[0].command.is_none());
