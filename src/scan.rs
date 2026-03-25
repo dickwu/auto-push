@@ -1,4 +1,3 @@
-// Module will be consumed by smart_init.rs (upcoming task).
 #![allow(dead_code)]
 
 use ignore::WalkBuilder;

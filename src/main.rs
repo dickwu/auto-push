@@ -99,6 +99,14 @@ struct Cli {
     #[arg(long)]
     show_config: bool,
 
+    /// Run AI-assisted smart initialization to generate a project-tailored pipeline
+    #[arg(long)]
+    smart_init: bool,
+
+    /// Auto-accept non-dangerous steps during --smart-init (skip interactive prompts)
+    #[arg(long, requires = "smart_init")]
+    yes: bool,
+
     /// Skip specific pipeline commands by name (repeatable)
     #[arg(long, action = clap::ArgAction::Append)]
     skip: Vec<String>,
@@ -119,6 +127,30 @@ fn main() -> Result<()> {
     // Show config and exit
     if cli.show_config {
         return config::show_config(&preflight_result.repo_root, &preflight_result.branch);
+    }
+
+    // Smart-init routing
+    if cli.smart_init {
+        let config_file = config::config_path(&preflight_result.repo_root);
+        if config_file.exists() {
+            print!("[smart-init] .auto-push.json already exists. Overwrite? [y/N] ");
+            std::io::Write::flush(&mut std::io::stdout())?;
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input)?;
+            if !input.trim().eq_ignore_ascii_case("y") {
+                println!("[smart-init] Aborted.");
+                return Ok(());
+            }
+        }
+        if let Some(provider) = config::detect_provider_for_smart_init() {
+            return smart_init::run_smart_init(&preflight_result.repo_root, &provider, 60, cli.yes);
+        }
+        eprintln!(
+            "[smart-init] No AI provider detected (claude, codex, ollama). \
+             Falling back to heuristic init."
+        );
+        config::auto_init_heuristic(&preflight_result.repo_root)?;
+        return Ok(());
     }
 
     // Validate --no-generate requires -m

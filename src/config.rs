@@ -241,7 +241,7 @@ pub fn load(repo_root: &Path, branch: &str) -> Result<AppConfig> {
 
     // Auto-init if repo config doesn't exist
     if !repo_path.exists() {
-        auto_init(repo_root)?;
+        auto_init_heuristic(repo_root)?;
     }
 
     // Start with built-in defaults as the base
@@ -345,7 +345,7 @@ fn apply_branch_overrides(merged: &mut serde_json::Value, branch: &str) -> Resul
 // Auto-init
 // ---------------------------------------------------------------------------
 
-fn auto_init(repo_root: &Path) -> Result<()> {
+pub fn auto_init_heuristic(repo_root: &Path) -> Result<()> {
     let path = config_path(repo_root);
     let provider = detect_provider();
     let project_commands = detect_project_commands(repo_root);
@@ -469,7 +469,15 @@ fn auto_init(repo_root: &Path) -> Result<()> {
     update_gitignore(repo_root);
     println!("[config] Created {CONFIG_FILE}. Run `auto-push --show-config` to see full config.");
 
+    if provider.is_some() {
+        println!("[config] For a project-tailored pipeline, run: auto-push --smart-init");
+    }
+
     Ok(())
+}
+
+pub fn detect_provider_for_smart_init() -> Option<ProviderConfig> {
+    detect_provider().map(ProviderConfig::Preset)
 }
 
 fn detect_provider() -> Option<String> {
@@ -547,7 +555,7 @@ fn detect_project_commands(repo_root: &Path) -> Vec<PipelineCommand> {
     }
 }
 
-fn update_gitignore(repo_root: &Path) {
+pub fn update_gitignore(repo_root: &Path) {
     let gitignore_path = repo_root.join(".gitignore");
     let entry = CONFIG_FILE;
 
@@ -1028,7 +1036,7 @@ mod tests {
         // Create a Cargo.toml so it detects Rust project
         std::fs::write(dir.path().join("Cargo.toml"), "[package]").unwrap();
 
-        auto_init(dir.path()).unwrap();
+        auto_init_heuristic(dir.path()).unwrap();
 
         let config_file = dir.path().join(CONFIG_FILE);
         assert!(config_file.exists());
@@ -1055,7 +1063,7 @@ mod tests {
     #[test]
     fn test_auto_init_updates_gitignore() {
         let dir = tempfile::tempdir().unwrap();
-        auto_init(dir.path()).unwrap();
+        auto_init_heuristic(dir.path()).unwrap();
 
         let gitignore = dir.path().join(".gitignore");
         assert!(gitignore.exists());
@@ -1069,7 +1077,7 @@ mod tests {
         std::fs::write(dir.path().join(".gitignore"), ".auto-push.json\n").unwrap();
 
         // Remove config to trigger auto-init
-        auto_init(dir.path()).unwrap();
+        auto_init_heuristic(dir.path()).unwrap();
 
         let content = std::fs::read_to_string(dir.path().join(".gitignore")).unwrap();
         // Should not duplicate

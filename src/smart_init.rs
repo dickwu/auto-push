@@ -1,10 +1,11 @@
-// Module will be consumed by CLI wiring (upcoming task).
 #![allow(dead_code)]
 
 use crate::config::{CaptureAfterEntry, CustomProvider, PipelineCommand, ProviderConfig};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::io::Write;
+use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
@@ -46,6 +47,44 @@ const CORE_ORDER: &[StepKind] = &[
     StepKind::Commit,
     StepKind::Push,
 ];
+
+/// System prompt sent to the AI provider during smart-init.
+pub const INIT_SYSTEM_PROMPT: &str = r#"You are a pipeline configuration expert for the "auto-push" CLI tool.
+
+Given a project fingerprint (config files, file tree, CI config, git remotes), return a JSON object with this exact schema:
+
+{
+  "analysis": "<1-3 sentence summary of project and recommended workflow>",
+  "steps": [
+    {
+      "name": "<unique step name>",
+      "kind": "<one of: stash, pull, unstash, stage, generate, commit, push, or omit for custom>",
+      "run": "<shell command>",
+      "description": "<human-readable description>",
+      "confidence": "<high|medium|low>",
+      "category": "<optional: lint, test, format, build, deploy, notify>",
+      "alternatives": ["<optional alternative commands>"]
+    }
+  ],
+  "detected": {
+    "language": "<primary language>",
+    "package_manager": "<detected package manager>",
+    "remote_name": "<git remote name>",
+    "remote_url": "<git remote url>",
+    "ci_platform": "<detected CI platform>"
+  }
+}
+
+Rules:
+1. Always include all 7 core steps with their "kind" field: stash, pull, unstash, stage, generate, commit, push.
+2. Core steps must appear in the correct order: stash < pull < unstash < stage < generate < commit < push.
+3. Custom steps (lint, test, format, build) go between unstash and stage, or between stage and generate.
+4. Each step must have exactly one of "run" (shell command) or "command" + "args" (argv mode).
+5. For the "generate" step, use the AI provider that was detected for this project.
+6. Return ONLY valid JSON — no markdown fences, no commentary outside the JSON object.
+7. Set confidence to "high" for standard toolchain commands, "medium" for inferred commands, "low" for guesses.
+8. Never include dangerous commands (curl|sh, eval, sudo, rm -rf /, etc.).
+"#;
 
 // ---------------------------------------------------------------------------
 // Types — StepKind
@@ -549,6 +588,366 @@ pub fn core_step_defaults() -> Vec<AiStep> {
             alternatives: None,
         },
     ]
+}
+
+// ---------------------------------------------------------------------------
+// Interactive walkthrough
+// ---------------------------------------------------------------------------
+
+/// Walk the user through each AI-proposed step, allowing edits and removals.
+///
+/// Returns the list of modifications the user chose. Core steps can only be
+/// edited (not removed). In `--yes` mode, non-dangerous steps are
+/// auto-accepted and dangerous ones are auto-removed.
+pub fn interactive_walkthrough(
+    steps: &[AiStep],
+    yes_mode: bool,
+    analysis: &str,
+) -> Result<Vec<Modification>> {
+    let is_tty = atty_is_tty();
+
+    if !is_tty && !yes_mode {
+        bail!(
+            "Non-interactive terminal detected.\n\
+             Use --smart-init --yes to accept defaults automatically."
+        );
+    }
+
+    println!("\n--- AI Analysis ---");
+    println!("{analysis}");
+    println!("-------------------\n");
+    println!("Proposed pipeline ({} steps):\n", steps.len());
+
+    let mut modifications = Vec::new();
+
+    for (i, step) in steps.iter().enumerate() {
+        let num = i + 1;
+        let is_core = step.kind.is_core();
+        let core_tag = if is_core { " [core]" } else { "" };
+        let desc = step.description.as_deref().unwrap_or("(no description)");
+        let confidence = step.confidence.as_deref().unwrap_or("unknown");
+        let run_display = step
+            .run
+            .as_deref()
+            .or(step.command.as_deref())
+            .unwrap_or("(none)");
+
+        println!("  {num}.{core_tag} {}", step.name);
+        println!("     {desc}");
+        println!("     confidence: {confidence}");
+        println!("     run: {run_display}");
+
+        // Check for dangerous command
+        let dangerous = is_dangerous_command(run_display);
+        if dangerous {
+            println!("     WARNING: This command matches a dangerous pattern!");
+        }
+
+        if yes_mode {
+            if dangerous {
+                println!("     -> auto-skipped (dangerous command in --yes mode)");
+                modifications.push(Modification::Removed {
+                    name: step.name.clone(),
+                    reason: Some("dangerous command auto-skipped in --yes mode".to_string()),
+                });
+            } else {
+                println!("     -> accepted");
+            }
+            println!();
+            continue;
+        }
+
+        // Interactive prompt
+        let choice = if is_core {
+            // Core steps cannot be removed
+            prompt_choice(
+                &format!("     Accept? [Y/e] (step {num}): "),
+                &["y", "e", ""],
+            )?
+        } else {
+            prompt_choice(
+                &format!("     Accept? [Y/n/e] (step {num}): "),
+                &["y", "n", "e", ""],
+            )?
+        };
+
+        match choice.as_str() {
+            "n" => {
+                let reason = prompt_line("     Reason (optional): ")?;
+                let reason = if reason.trim().is_empty() {
+                    None
+                } else {
+                    Some(reason.trim().to_string())
+                };
+                modifications.push(Modification::Removed {
+                    name: step.name.clone(),
+                    reason,
+                });
+                println!("     -> removed");
+            }
+            "e" => {
+                let new_val = prompt_line("     New command: ")?;
+                let new_val = new_val.trim().to_string();
+                if new_val.is_empty() {
+                    println!("     -> kept original (empty input)");
+                } else {
+                    modifications.push(Modification::Edited {
+                        name: step.name.clone(),
+                        new_run: new_val.clone(),
+                    });
+                    println!("     -> edited to: {new_val}");
+                }
+            }
+            // "y" or "" (Enter) — accept
+            _ => {
+                println!("     -> accepted");
+            }
+        }
+        println!();
+    }
+
+    // Print summary
+    let removed_count = modifications
+        .iter()
+        .filter(|m| matches!(m, Modification::Removed { .. }))
+        .count();
+    let edited_count = modifications
+        .iter()
+        .filter(|m| matches!(m, Modification::Edited { .. }))
+        .count();
+    println!(
+        "Summary: {} accepted, {} removed, {} edited",
+        steps.len() - removed_count,
+        removed_count,
+        edited_count
+    );
+
+    Ok(modifications)
+}
+
+/// Check whether stdin is a TTY. Separated for testability.
+fn atty_is_tty() -> bool {
+    std::io::IsTerminal::is_terminal(&std::io::stdin())
+}
+
+/// Prompt the user and return a lowercased single-char response.
+/// Allowed values are checked; Enter returns "".
+fn prompt_choice(prompt: &str, allowed: &[&str]) -> Result<String> {
+    loop {
+        print!("{prompt}");
+        std::io::stdout()
+            .flush()
+            .context("failed to flush stdout")?;
+
+        let mut input = String::new();
+        std::io::stdin()
+            .read_line(&mut input)
+            .context("failed to read user input")?;
+
+        let trimmed = input.trim().to_lowercase();
+        if allowed.contains(&trimmed.as_str()) {
+            return Ok(trimmed);
+        }
+        println!(
+            "     Invalid choice. Please enter one of: {}",
+            allowed.join(", ")
+        );
+    }
+}
+
+/// Prompt for a free-form line of input.
+fn prompt_line(prompt: &str) -> Result<String> {
+    print!("{prompt}");
+    std::io::stdout()
+        .flush()
+        .context("failed to flush stdout")?;
+
+    let mut input = String::new();
+    std::io::stdin()
+        .read_line(&mut input)
+        .context("failed to read user input")?;
+
+    Ok(input)
+}
+
+// ---------------------------------------------------------------------------
+// Atomic write
+// ---------------------------------------------------------------------------
+
+/// Write content to a file atomically: write to `.tmp`, fsync, rename.
+/// Rejects symlink targets to prevent symlink-following attacks.
+pub fn atomic_write_config(path: &Path, content: &str) -> Result<()> {
+    // Reject if path is a symlink
+    if let Ok(meta) = std::fs::symlink_metadata(path)
+        && meta.file_type().is_symlink()
+    {
+        bail!("refusing to write to symlink target: {}", path.display());
+    }
+
+    let tmp_path = path.with_extension("json.tmp");
+
+    // Write to temp file
+    let mut file = std::fs::File::create(&tmp_path)
+        .with_context(|| format!("failed to create temp file: {}", tmp_path.display()))?;
+    file.write_all(content.as_bytes())
+        .with_context(|| format!("failed to write temp file: {}", tmp_path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("failed to fsync temp file: {}", tmp_path.display()))?;
+
+    // Atomic rename
+    std::fs::rename(&tmp_path, path).with_context(|| {
+        format!(
+            "failed to rename {} -> {}",
+            tmp_path.display(),
+            path.display()
+        )
+    })?;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Smart-init orchestrator
+// ---------------------------------------------------------------------------
+
+/// Run the full smart-init workflow:
+///
+/// 1. Fingerprint the project
+/// 2. Call AI for init config
+/// 3. Parse response (retry once, fallback to heuristic)
+/// 4. Deduplicate step names
+/// 5. Interactive walkthrough
+/// 6. Apply modifications
+/// 7. Validate pipeline
+/// 8. Convert to PipelineCommands and write config
+/// 9. Update .gitignore
+pub fn run_smart_init(
+    repo_root: &Path,
+    provider: &ProviderConfig,
+    timeout_secs: u64,
+    yes_mode: bool,
+) -> Result<()> {
+    println!("[smart-init] Scanning project...");
+
+    // Phase 1: Fingerprint
+    let fingerprint = crate::scan::scan_project(repo_root);
+    let file_tree = crate::scan::build_file_tree(repo_root, 3);
+    let prompt_context = fingerprint.to_prompt_context(&file_tree);
+
+    println!("[smart-init] Calling AI provider for pipeline recommendation...");
+
+    // Phase 2: AI Analysis
+    let ai_result = call_ai_for_init(provider, &prompt_context, INIT_SYSTEM_PROMPT, timeout_secs);
+
+    let mut steps = match ai_result {
+        Ok(raw_output) => {
+            // Phase 3: Parse response
+            match parse_ai_response(&raw_output) {
+                Ok(response) => {
+                    println!("[smart-init] AI analysis received.");
+                    // Phase 4: Deduplicate
+                    let mut steps = response.steps;
+                    deduplicate_step_names(&mut steps);
+
+                    // Phase 5: Interactive walkthrough
+                    let modifications =
+                        interactive_walkthrough(&steps, yes_mode, &response.analysis)?;
+
+                    // Phase 6: Apply modifications
+                    apply_modifications(&mut steps, &modifications);
+
+                    steps
+                }
+                Err(first_err) => {
+                    eprintln!("[smart-init] First parse failed: {first_err}. Retrying AI call...");
+                    // Retry once
+                    match call_ai_for_init(
+                        provider,
+                        &prompt_context,
+                        INIT_SYSTEM_PROMPT,
+                        timeout_secs,
+                    ) {
+                        Ok(retry_output) => match parse_ai_response(&retry_output) {
+                            Ok(response) => {
+                                println!("[smart-init] AI analysis received on retry.");
+                                let mut steps = response.steps;
+                                deduplicate_step_names(&mut steps);
+                                let modifications =
+                                    interactive_walkthrough(&steps, yes_mode, &response.analysis)?;
+                                apply_modifications(&mut steps, &modifications);
+                                steps
+                            }
+                            Err(_) => {
+                                save_raw_to_temp(&retry_output);
+                                eprintln!(
+                                    "[smart-init] Could not parse AI response after retry. \
+                                     Falling back to heuristic defaults."
+                                );
+                                core_step_defaults()
+                            }
+                        },
+                        Err(_) => {
+                            eprintln!(
+                                "[smart-init] AI retry failed. \
+                                 Falling back to heuristic defaults."
+                            );
+                            core_step_defaults()
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("[smart-init] AI call failed: {e}. Falling back to heuristic defaults.");
+            core_step_defaults()
+        }
+    };
+
+    // Phase 7: Validate pipeline
+    if let Err(e) = validate_pipeline(&steps) {
+        eprintln!(
+            "[smart-init] Pipeline validation failed: {e}. Falling back to heuristic defaults."
+        );
+        steps = core_step_defaults();
+    }
+
+    // Phase 8: Convert to PipelineCommands and serialize
+    let pipeline_commands = convert_to_pipeline_commands(&steps);
+    let config = serde_json::json!({
+        "pipeline": pipeline_commands,
+    });
+    let content =
+        serde_json::to_string_pretty(&config).context("failed to serialize smart-init config")?;
+    let content = format!("{content}\n");
+
+    // Phase 9: Atomic write
+    let config_path = crate::config::config_path(repo_root);
+    atomic_write_config(&config_path, &content)?;
+    println!("[smart-init] Wrote {}", config_path.display());
+
+    // Phase 10: Update .gitignore
+    crate::config::update_gitignore(repo_root);
+
+    println!("[smart-init] Done! Run `auto-push --show-config` to review.");
+
+    Ok(())
+}
+
+/// Save raw AI output to a temp file for debugging (without echoing to terminal).
+fn save_raw_to_temp(raw: &str) {
+    let tmp_dir = std::env::temp_dir();
+    let tmp_path = tmp_dir.join("auto-push-smart-init-raw.txt");
+    if let Err(e) = std::fs::write(&tmp_path, raw) {
+        eprintln!(
+            "[smart-init] Warning: could not save raw AI output to {}: {e}",
+            tmp_path.display()
+        );
+    } else {
+        eprintln!(
+            "[smart-init] Raw AI output saved to {} for debugging.",
+            tmp_path.display()
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
