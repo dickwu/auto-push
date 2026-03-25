@@ -62,7 +62,43 @@ auto-push --provider codex
 
 # Show the merged config for the current branch
 auto-push --show-config
+
+# Generate a project-tailored .auto-push.json with AI assistance
+auto-push --smart-init
+
+# Smart-init without interactive confirmation prompts
+auto-push --smart-init --yes
 ```
+
+## Smart Init
+
+`--smart-init` generates a project-tailored `.auto-push.json` by scanning your repository and asking your AI provider to build a pipeline suited to your stack.
+
+```bash
+auto-push --smart-init
+```
+
+### What it does
+
+1. **Scans the project** — reads manifest files (`package.json`, `Cargo.toml`, `pyproject.toml`, etc.), CI configs (`.github/workflows/`, `.gitlab-ci.yml`, etc.), Docker files, and git remotes. Credentials in remote URLs are redacted before anything is sent to the AI.
+
+2. **Detects your workspace layout** — identifies sub-workspaces and monorepos (npm workspaces, Cargo workspace, Lerna, Nx, pnpm-workspace.yaml), auto-labeling known directories like `src-tauri` or `packages/*`.
+
+3. **Calls your AI provider** — sends the project fingerprint and file tree as context. The AI returns a structured JSON pipeline that includes the 7 core steps (stash, pull, unstash, stage, generate, commit, push) plus project-specific steps like `cargo test`, `npm run lint`, or `pnpm build`.
+
+4. **Walks you through the result** — shows each proposed step with its confidence level (`high`, `medium`, `low`) and any alternatives. You can accept, edit, or remove each step interactively.
+
+5. **Writes `.auto-push.json`** — the final approved pipeline is written to disk. If a config file already exists, you are prompted before it is overwritten.
+
+Pass `--yes` to accept all non-dangerous steps without prompts:
+
+```bash
+auto-push --smart-init --yes
+```
+
+### Safety
+
+Smart-init validates every AI-generated command before presenting it. Steps containing patterns like `curl | sh`, `eval`, `sudo`, `rm -rf /`, or pipe-to-shell are rejected outright and never shown or written. If no AI provider is detected (claude, codex, ollama), smart-init falls back to the standard heuristic init.
 
 ## Configuration
 
@@ -295,6 +331,8 @@ Each pipeline step is a configurable shell command. Skip any step with `--skip <
 | `--force` | Auto-accept all confirmation prompts |
 | `--provider <name>` | Override the generate command's provider |
 | `--show-config` | Show merged config and exit |
+| `--smart-init` | AI-assisted interactive setup — scans the project and generates a tailored pipeline |
+| `--yes` | Auto-accept non-dangerous steps during `--smart-init` (requires `--smart-init`) |
 
 **Deprecated flags** (kept for one major version):
 
