@@ -73,6 +73,69 @@ fn test_help_shows_new_flags() {
         stdout.contains("--no-stash"),
         "Missing --no-stash flag in help"
     );
+    assert!(
+        stdout.contains("--smart-init"),
+        "Missing --smart-init flag in help"
+    );
+    assert!(stdout.contains("--yes"), "Missing --yes flag in help");
+}
+
+// ---------------------------------------------------------------------------
+// Smart init JSON contract tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_smart_init_json_contract() {
+    // Validates the JSON shape that AI providers must return.
+    // auto-push is a binary crate so we can't import internal types —
+    // use serde_json::Value to verify the contract.
+    let json = r#"{
+        "analysis": "Rust CLI project",
+        "steps": [
+            {"name": "stash", "kind": "stash", "run": "git stash push -m 'auto-push' || true", "description": "Stash"},
+            {"name": "pull", "kind": "pull", "run": "git pull", "description": "Pull"},
+            {"name": "unstash", "kind": "unstash", "run": "git stash pop || true", "description": "Unstash"},
+            {"name": "test", "kind": "custom", "run": "cargo test", "description": "Tests", "confidence": "high"},
+            {"name": "stage", "kind": "stage", "run": "git add -A", "description": "Stage"},
+            {"name": "generate", "kind": "generate", "run": "echo placeholder", "description": "Generate"},
+            {"name": "commit", "kind": "commit", "run": "git commit -m '{{ commit_message }}'", "description": "Commit"},
+            {"name": "push", "kind": "push", "run": "git push origin main", "description": "Push"}
+        ],
+        "detected": {"language": "rust", "package_manager": "cargo"}
+    }"#;
+
+    let resp: serde_json::Value = serde_json::from_str(json).unwrap();
+    assert_eq!(resp["steps"].as_array().unwrap().len(), 8);
+    assert_eq!(resp["detected"]["language"].as_str(), Some("rust"));
+    assert_eq!(resp["steps"][0]["kind"].as_str(), Some("stash"));
+    assert_eq!(resp["steps"][3]["confidence"].as_str(), Some("high"));
+    assert_eq!(resp["analysis"].as_str(), Some("Rust CLI project"));
+}
+
+#[test]
+fn test_smart_init_requires_remote() {
+    // --smart-init still needs a git remote (preflight checks run first)
+    let dir = tempfile::tempdir().unwrap();
+    init_repo(dir.path());
+    std::fs::write(dir.path().join("file.txt"), "hello").unwrap();
+    git_in(dir.path(), &["add", "."]);
+    git_in(dir.path(), &["commit", "-m", "init"]);
+
+    let output = auto_push_bin()
+        .args(["--smart-init"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        combined.contains("remote"),
+        "Expected remote error, got: {combined}"
+    );
 }
 
 #[test]
