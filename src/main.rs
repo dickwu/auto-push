@@ -5,6 +5,7 @@ mod git;
 mod pipeline;
 mod preflight;
 mod scan;
+mod smart_init;
 mod template;
 mod vars;
 
