@@ -1,7 +1,7 @@
 # Smart Init: AI-Powered Pipeline Generation
 
 **Date:** 2026-03-25
-**Status:** Draft
+**Status:** Draft (security-hardened after Codex audit)
 **Author:** Claude + gwddeveloper
 
 ## Summary
@@ -17,7 +17,7 @@ Replace the hardcoded heuristic-based `auto_init` with an AI-powered pipeline ge
 | User interaction | Interactive guided: AI generates draft, Rust walks through each step |
 | No AI fallback | Heuristic init (current behavior) + upgrade hint to `--smart-init` |
 | Ecosystem detection | Ecosystem-agnostic fingerprinting — AI infers language/tools |
-| Architecture | Two-phase: AI analysis + optional AI refinement if user modifies steps |
+| Architecture | Two-phase: AI analysis + local delta application (no second AI call for rewrites) |
 
 ## Architecture
 
@@ -35,10 +35,13 @@ auto-push --smart-init
   ├─ Phase 3: Interactive Walkthrough (Rust-driven, no AI calls)
   │   └─ Present each step with [Y/n/e], collect user modifications as delta
   │
-  ├─ Phase 4: AI Refinement (call #2, only if user made changes)
-  │   └─ Send draft + user deltas to AI, receive final pipeline
+  ├─ Phase 4: Apply Modifications (local Rust, no AI call)
+  │   └─ Apply user deltas (removals + edits) to accepted steps in Rust
   │
-  └─ Phase 5: Write .auto-push.json + update .gitignore
+  ├─ Phase 5: Validate Pipeline
+  │   └─ Convert AiSteps to PipelineCommands, run semantic validation
+  │
+  └─ Phase 6: Write .auto-push.json (atomic) + update .gitignore
 ```
 
 ### Entry Points
@@ -85,9 +88,14 @@ pub struct ConfigFile {
 
 ### What It Collects
 
-**File tree:** Recursive `fs::read_dir` to 3 levels max. Skips `.git`, `node_modules`, `target`, `vendor`, `dist`, `build`, `__pycache__`, `.next`.
+**File tree:** Recursive `fs::read_dir` to 3 levels max. Respects `.gitignore` patterns — parse the repo's `.gitignore` (and nested `.gitignore` files) using the `ignore` crate (same glob engine as `ripgrep`) to skip ignored paths. Additionally hardcode-skips: `.git`.
 
-**Git remotes:** `git remote -v` parsed into name + URL pairs.
+**Git remotes:** `git remote -v` parsed into name + URL pairs. **Credential redaction:** URLs containing embedded credentials (`https://user:token@host`) are sanitized to `https://***@host` before inclusion in the fingerprint.
+
+**Excluded files (never read, even if present):**
+- `.env`, `.env.*`, `*.pem`, `*.key`, `.npmrc`, `.pypirc`, `auth.*`, `credentials.*`
+- Any file matching `.gitignore` patterns (already excluded by the `ignore` crate walker)
+- Additional hardcoded secret patterns as a safety net for repos with incomplete `.gitignore`
 
 **Config/manifest files (read contents):**
 - `package.json`, `Cargo.toml`, `go.mod`, `pyproject.toml`, `setup.py`, `setup.cfg`
@@ -146,6 +154,7 @@ Return ONLY valid JSON with this structure:
   "steps": [
     {
       "name": "step-name",
+      "kind": "custom",
       "run": "shell command",
       "description": "Why this step exists",
       "confidence": "high|medium|low",
@@ -163,7 +172,8 @@ Return ONLY valid JSON with this structure:
 }
 
 Rules:
-- Always include core steps: stash, pull, unstash, stage, generate, commit, push
+- Always include core steps with their exact "kind" values: stash, pull, unstash, stage, generate, commit, push
+- Use "kind": "<kind>" for core steps (e.g. "kind": "stash"), "kind": "custom" for project-specific steps
 - Add test/lint/format steps BETWEEN unstash and stage
 - Use the actual remote name from the project (not always "origin")
 - Use the actual package manager (bun/pnpm/yarn, not always npm)
@@ -191,6 +201,8 @@ pub struct AiResponse {
 #[derive(Deserialize)]
 pub struct AiStep {
     pub name: String,
+    #[serde(default)]
+    pub kind: StepKind,              // core vs custom, matched by enum not name
     pub run: Option<String>,
     pub command: Option<String>,
     pub args: Option<Vec<String>>,
@@ -214,33 +226,53 @@ After the walkthrough, accepted `AiStep` entries are converted to `PipelineComma
 
 ### Core Step Identification
 
-Core steps are identified by a **hardcoded name list** in Rust:
+Core steps use a **`kind` enum** rather than matching on the free-form `name` string:
 
 ```rust
-const CORE_STEP_NAMES: &[&str] = &[
-    "stash", "pull", "unstash", "stage", "generate", "commit", "push"
-];
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StepKind {
+    Stash, Pull, Unstash, Stage, Generate, Commit, Push,
+    #[serde(other)]
+    Custom,
+}
 ```
 
-The AI prompt instructs the AI to use these exact names for core steps. During the walkthrough, any step whose `name` matches this list is tagged `[core]` and cannot be removed (only edited). If the AI uses a different name for a core concept, it is treated as non-core — the user can remove it.
+The AI prompt instructs the AI to include `"kind": "stash"` (etc.) for core steps. The `AiStep` struct gains a `kind: StepKind` field. During the walkthrough:
+- Steps with a non-`Custom` kind are tagged `[core]` and cannot be removed (only edited)
+- Steps with `kind: Custom` (or missing kind) can be removed
+- After the walkthrough, validation ensures all 7 required core kinds are present. If any are missing, warn and insert a default
+
+**Name uniqueness:** `AiStep` names must be unique within the pipeline. Duplicates detected at parse time are suffixed with `-2`, `-3`, etc. and flagged to the user during walkthrough.
 
 ### Workspace Grouping (Walkthrough Only)
 
 The interactive walkthrough groups steps by workspace for readability, using the `AiStep.category` or name prefix (e.g., `frontend-lint`, `tauri-test`). This grouping is **display-only** and is not persisted to `.auto-push.json`. The final config is a flat pipeline array.
 
-### Call #2: Refinement (only if user made modifications)
+### Phase 4: Local Delta Application (No Second AI Call)
 
+User modifications are applied **locally in Rust** — no second AI call. This eliminates the risk of the AI silently altering already-approved steps.
+
+```rust
+fn apply_modifications(steps: &mut Vec<AiStep>, mods: &[Modification]) {
+    for m in mods {
+        match m {
+            Modification::Removed { name, .. } => {
+                steps.retain(|s| s.name != *name);
+            }
+            Modification::Edited { name, new_run } => {
+                if let Some(step) = steps.iter_mut().find(|s| s.name == *name) {
+                    step.run = Some(new_run.clone());
+                    step.command = None;
+                    step.args = None;
+                }
+            }
+        }
+    }
+}
 ```
-Here is the draft pipeline you generated: <draft JSON>
 
-The user made these modifications:
-- Removed step "lint" (reason: "we don't use eslint")
-- Changed step "tests" run from "npm test" to "bun test"
-- Accepted all other steps
-
-Generate the final pipeline incorporating these changes.
-Return ONLY the pipeline array (valid JSON, same schema as before).
-```
+This is deterministic, instant, and the user sees exactly what they approved.
 
 ### Provider Dispatch
 
@@ -264,7 +296,7 @@ This builds the appropriate CLI args per provider (claude/codex/ollama/custom), 
 1. Try `serde_json::from_str` on AI output
 2. If fails, strip markdown code fences (` ```json ... ``` `) and retry
 3. If still fails, retry AI call once with "return ONLY valid JSON, no markdown" nudge
-4. If that fails, fall back to heuristic init with warning showing raw AI output
+4. If that fails, fall back to heuristic init. Write raw AI output to a temp file and print its path — do NOT echo raw output to terminal (prevents secret leakage and ANSI escape injection). Full output available via `--debug` flag.
 
 ## Interactive Walkthrough UX
 
@@ -342,20 +374,54 @@ enum Modification {
 If `modifications.is_empty()` — write directly, skip AI call #2.
 If modifications exist — trigger AI call #2 for refinement.
 
-### Non-TTY / CI
+### Non-TTY / CI Safety
 
-Auto-accept all steps. Print: `[init] No TTY -- accepting all AI recommendations`.
+**Non-TTY requires explicit `--yes` flag.** Without it, `--smart-init` in a non-TTY environment aborts:
+
+```
+[init] Error: --smart-init requires a TTY for interactive walkthrough.
+[init] Use --smart-init --yes to auto-accept all AI recommendations without review.
+```
+
+With `--yes`: auto-accept all steps, write config, print full summary of what was written. This prevents prompt injection attacks from writing arbitrary shell commands to `.auto-push.json` without human review.
+
+### Command Safety Checks
+
+Before writing any `run` value to config (whether from AI or user edit), validate against a blocklist of dangerous patterns:
+
+```rust
+const DANGEROUS_PATTERNS: &[&str] = &[
+    "curl ", "wget ", "sh -c", "bash -c", "eval ",
+    "rm -rf /", "> /dev/sd", "mkfs", "dd if=",
+];
+```
+
+If a generated command matches, flag it during the walkthrough:
+
+```
+  ⚠ 7. deploy — Post-push deployment (confidence: low)
+     > curl https://deploy.example.com/hook | sh
+     WARNING: This command downloads and executes remote code.
+     [Y/n/e] _
+```
+
+In `--yes` mode, dangerous commands are **skipped** with a warning, not auto-accepted.
 
 ## CLI Integration
 
-### New Flag
+### New Flags
 
 ```rust
+/// Use AI to scan the project and generate a tailored pipeline
 #[arg(long)]
 smart_init: bool,
+
+/// Auto-accept all AI recommendations without interactive review (requires --smart-init)
+#[arg(long, requires = "smart_init")]
+yes: bool,
 ```
 
-Invoked: `auto-push --smart-init`
+Invoked: `auto-push --smart-init` (interactive) or `auto-push --smart-init --yes` (CI/non-TTY)
 
 ### Upgrade Hint
 
@@ -390,7 +456,7 @@ After heuristic init (when AI is available but `--smart-init` not passed):
 | Config file > 2KB | Truncate with `... (truncated)` marker |
 | Total fingerprint > 30KB | Truncate least-important files first |
 | No config files at all | AI still gets file tree + remotes |
-| Symlinks | Follow 1 level, skip circular |
+| Symlinks | `fs::canonicalize` every symlink target; reject if canonical path is outside repo root. Maintain visited-inode set to prevent cycles. Never read symlinked config files — only follow symlinked directories with containment enforcement. |
 
 ### Interactive Edge Cases
 
@@ -399,6 +465,37 @@ After heuristic init (when AI is available but `--smart-init` not passed):
 | Ctrl+C mid-walkthrough | No config written, clean exit |
 | Config exists + `--smart-init` | Prompt: "Overwrite? [y/N]" |
 | `--smart-init` in CI (no TTY) | Auto-accept all, write, print summary |
+
+### Pipeline Validation Before Write
+
+After converting `AiStep`s to `PipelineCommand`s, run semantic validation before writing:
+
+1. Exactly one of `run` or `command` per step (mutual exclusion)
+2. No duplicate step names
+3. All 7 core step kinds present (stash, pull, unstash, stage, generate, commit, push)
+4. Core steps in correct relative order
+5. `capture` references don't create circular dependencies
+
+If validation fails: warn the user, show the specific issue, and offer to fall back to heuristic init or re-run the walkthrough.
+
+### Atomic Config Write
+
+Write config atomically to prevent partial files on crash:
+
+```rust
+// 1. Write to temp file
+let tmp_path = path.with_extension("json.tmp");
+fs::write(&tmp_path, &content)?;
+
+// 2. Sync to disk
+let f = fs::File::open(&tmp_path)?;
+f.sync_all()?;
+
+// 3. Atomic rename
+fs::rename(&tmp_path, &path)?;
+```
+
+Before writing, check with `fs::symlink_metadata` that the target is not a symlink.
 
 ### Fallback Guarantee
 
@@ -430,6 +527,18 @@ Every code path produces a valid `.auto-push.json`. Smart init is best-effort; h
 - `test_smart_init_end_to_end` — mock AI CLI (shell script returning JSON), verify config output
 - `test_smart_init_fallback_on_ai_failure` — mock AI exits 1, verify heuristic fallback
 - `test_smart_init_retry_on_bad_json` — mock returns garbage then valid JSON
+
+### Unit Tests: Security
+
+- `test_redact_remote_url_credentials` — `https://user:token@host` → `https://***@host`
+- `test_skip_secret_files` — `.env`, `.npmrc`, `*.pem` not included in fingerprint
+- `test_gitignore_respected` — files matching `.gitignore` patterns excluded from scan
+- `test_symlink_containment` — symlink to outside repo root is rejected
+- `test_dangerous_command_detection` — `curl ... | sh` flagged as dangerous
+- `test_dangerous_command_blocked_in_yes_mode` — dangerous commands skipped with `--yes`
+- `test_pipeline_validation_rejects_invalid` — missing core steps, duplicate names, both run+command
+- `test_atomic_write_no_partial` — crash during write does not leave partial config
+- `test_non_tty_requires_yes_flag` — `--smart-init` without `--yes` in non-TTY aborts
 
 ### Mock AI CLI Approach
 
