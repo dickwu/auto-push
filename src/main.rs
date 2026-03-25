@@ -132,7 +132,7 @@ fn main() -> Result<()> {
     // Smart-init routing
     if cli.smart_init {
         let config_file = config::config_path(&preflight_result.repo_root);
-        if config_file.exists() {
+        if config_file.exists() && !cli.yes {
             print!("[smart-init] .auto-push.json already exists. Overwrite? [y/N] ");
             std::io::Write::flush(&mut std::io::stdout())?;
             let mut input = String::new();
