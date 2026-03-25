@@ -572,9 +572,7 @@ fn generate_step_for_provider(
                 custom
                     .args
                     .iter()
-                    .map(|a| {
-                        a.replace("{{ prompt }}", "{{ diff }}")
-                    })
+                    .map(|a| a.replace("{{ prompt }}", "{{ diff }}"))
                     .collect(),
             ),
         ),

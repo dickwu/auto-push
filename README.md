@@ -84,13 +84,13 @@ auto-push --smart-init
 
 2. **Detects your workspace layout** — identifies sub-workspaces and monorepos (npm workspaces, Cargo workspace, Lerna, Nx, pnpm-workspace.yaml), auto-labeling known directories like `src-tauri` or `packages/*`.
 
-3. **Calls your AI provider** — sends the project fingerprint and file tree as context. The AI returns a structured JSON pipeline that includes the 7 core steps (stash, pull, unstash, stage, generate, commit, push) plus project-specific steps like `cargo test`, `npm run lint`, or `pnpm build`.
+3. **Calls your AI provider** — sends the project fingerprint and file tree as context. The AI returns a structured JSON pipeline that includes the 7 core steps (stash, pull, unstash, stage, generate, commit, push) plus project-specific steps like `cargo test`, `npm run lint`, or `pnpm build`. Pass `--provider` to choose which AI is used for generation and to have that provider written into the generated `generate` step.
 
 4. **Walks you through the result** — shows each proposed step with its confidence level (`high`, `medium`, `low`) and any alternatives. You can accept, edit, or remove each step interactively.
 
 5. **Writes `.auto-push.json`** — the final approved pipeline is written to disk. If a config file already exists, you are prompted before it is overwritten.
 
-Pass `--yes` to accept all non-dangerous steps without prompts:
+Pass `--yes` to skip all interactive prompts, including the overwrite confirmation and non-dangerous step confirmations:
 
 ```bash
 auto-push --smart-init --yes
