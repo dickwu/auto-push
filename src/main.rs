@@ -142,7 +142,13 @@ fn main() -> Result<()> {
                 return Ok(());
             }
         }
-        if let Some(provider) = config::detect_provider_for_smart_init() {
+        // Use --provider flag if given, otherwise auto-detect from PATH
+        let smart_init_provider = if let Some(ref name) = cli.provider {
+            Some(ProviderConfig::Preset(name.clone()))
+        } else {
+            config::detect_provider_for_smart_init()
+        };
+        if let Some(provider) = smart_init_provider {
             return smart_init::run_smart_init(&preflight_result.repo_root, &provider, 60, cli.yes);
         }
         eprintln!(
