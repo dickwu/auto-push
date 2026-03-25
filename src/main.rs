@@ -4,6 +4,7 @@ mod generate;
 mod git;
 mod pipeline;
 mod preflight;
+mod scan;
 mod template;
 mod vars;
 
