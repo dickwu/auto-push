@@ -123,8 +123,9 @@ Cap: maximum 20 sub-workspaces. Warn if truncated.
 ### Token Budget
 
 - Each config file truncated to 2KB
+- File tree listing capped at 8KB (truncate deepest levels first)
 - Total fingerprint capped at ~30KB
-- Truncation priority (least important first): build files, CI files, configs
+- Truncation priority (least important first): build files, CI files, configs, file tree
 
 ### Output
 
@@ -174,6 +175,59 @@ Rules:
 
 User message contains the fingerprint context.
 
+### Intermediate Type: `AiStep`
+
+The AI response is deserialized into a separate intermediate type, **not** into `PipelineCommand` directly. Extra fields (`confidence`, `category`, `alternatives`) are walkthrough-only and do not survive into the final `.auto-push.json`.
+
+```rust
+/// Deserialized from AI response. NOT persisted to config.
+#[derive(Deserialize)]
+pub struct AiResponse {
+    pub analysis: String,
+    pub steps: Vec<AiStep>,
+    pub detected: AiDetected,
+}
+
+#[derive(Deserialize)]
+pub struct AiStep {
+    pub name: String,
+    pub run: Option<String>,
+    pub command: Option<String>,
+    pub args: Option<Vec<String>>,
+    pub description: Option<String>,
+    pub confidence: Option<String>,   // walkthrough display only
+    pub category: Option<String>,     // walkthrough display only
+    pub alternatives: Option<Vec<String>>, // walkthrough display only
+}
+
+#[derive(Deserialize)]
+pub struct AiDetected {
+    pub language: Option<String>,
+    pub package_manager: Option<String>,
+    pub remote_name: Option<String>,
+    pub remote_url: Option<String>,
+    pub ci_platform: Option<String>,
+}
+```
+
+After the walkthrough, accepted `AiStep` entries are converted to `PipelineCommand` (dropping `confidence`, `category`, `alternatives`).
+
+### Core Step Identification
+
+Core steps are identified by a **hardcoded name list** in Rust:
+
+```rust
+const CORE_STEP_NAMES: &[&str] = &[
+    "stash", "pull", "unstash", "stage", "generate", "commit", "push"
+];
+```
+
+The AI prompt instructs the AI to use these exact names for core steps. During the walkthrough, any step whose `name` matches this list is tagged `[core]` and cannot be removed (only edited). If the AI uses a different name for a core concept, it is treated as non-core — the user can remove it.
+
+### Workspace Grouping (Walkthrough Only)
+
+The interactive walkthrough groups steps by workspace for readability, using the `AiStep.category` or name prefix (e.g., `frontend-lint`, `tauri-test`). This grouping is **display-only** and is not persisted to `.auto-push.json`. The final config is a flat pipeline array.
+
 ### Call #2: Refinement (only if user made modifications)
 
 ```
@@ -190,7 +244,20 @@ Return ONLY the pipeline array (valid JSON, same schema as before).
 
 ### Provider Dispatch
 
-Reuses existing `generate.rs` infrastructure — same provider config, same timeout, same structured output guard. Prompt passed via template variables.
+Smart init invokes the AI CLI **directly via `std::process::Command`** (not through `pipeline.rs`). It reads the provider config from `GenerateConfig` to determine the command and args, applies the same timeout, and handles the structured output guard. This is a new function in `config.rs` (or a new `src/smart_init.rs` module) — it does not go through `run_pipeline()` since we need to capture and parse structured JSON, not stream output.
+
+The function signature:
+
+```rust
+fn call_ai_for_init(
+    provider: &ProviderConfig,
+    prompt: &str,
+    system_prompt: &str,
+    timeout_secs: u64,
+) -> Result<String>
+```
+
+This builds the appropriate CLI args per provider (claude/codex/ollama/custom), executes the command, and returns the raw stdout.
 
 ### JSON Parsing
 
@@ -372,10 +439,10 @@ Tests create temp shell scripts as fake AI providers via `ProviderConfig::Custom
 
 | File | Change |
 |------|--------|
-| `src/scan.rs` | **New** — project fingerprint scanner |
-| `src/config.rs` | Add `smart_init()`, AI response parsing, refinement prompt builder |
+| `src/scan.rs` | **New** — project fingerprint scanner, `ProjectFingerprint`, workspace detection |
+| `src/smart_init.rs` | **New** — `smart_init()` orchestrator, `AiStep`/`AiResponse` types, `call_ai_for_init()`, interactive walkthrough, refinement prompt builder |
+| `src/config.rs` | Add heuristic init upgrade hint, overwrite guard for `--smart-init` |
 | `src/main.rs` | Add `--smart-init` flag, new init routing logic |
-| `src/generate.rs` | Minor: expose provider dispatch for init prompts (may reuse existing) |
 | `tests/smart_init.rs` | **New** — integration tests with mock AI CLI |
 
 ## Out of Scope
