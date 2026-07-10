@@ -1,0 +1,35 @@
+{
+  "agents": [
+    {
+      "agent_id": "aclaudemd-audit-d49ebf7a993ed48a",
+      "agent_type": "claudemd-audit",
+      "started_at": "2026-07-10T15:23:36.057Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-10T15:30:40.582Z",
+      "duration_ms": 424525
+    },
+    {
+      "agent_id": "abe4a2c0f1889bc56",
+      "agent_type": "unknown",
+      "started_at": "2026-07-10T15:27:02.873Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-10T15:27:02.873Z",
+      "duration_ms": 0
+    },
+    {
+      "agent_id": "ae33e7653aefaf2f3",
+      "agent_type": "unknown",
+      "started_at": "2026-07-10T15:36:16.492Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-10T15:36:16.492Z",
+      "duration_ms": 0
+    }
+  ],
+  "total_spawned": 1,
+  "total_completed": 4,
+  "total_failed": 0,
+  "last_updated": "2026-07-10T15:36:16.731Z"
+}

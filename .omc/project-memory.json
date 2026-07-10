@@ -1,0 +1,213 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1783696917797,
+  "projectRoot": "/Volumes/GWD/opensource/auto-push",
+  "techStack": {
+    "languages": [
+      {
+        "name": "Rust",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "Cargo.toml"
+        ]
+      }
+    ],
+    "frameworks": [],
+    "packageManager": "cargo",
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": "cd /Volumes/GWD/opensource/auto-push\ncargo build 2>&1 | tail -1\ngit add Cargo.toml Cargo.lock\ngit commit -q -m \"chore: release v0.8.3\"\necho \"=== release commit ===\"; rtk git log -2 --format='%h %s'\necho \"=== Cargo.lock version synced? ===\"; rtk grep -A1 'name = \"auto-push\"' Cargo.lock | head -2",
+    "testCommand": "rtk cargo fmt && rtk cargo clippy --all-targets -- -D warnings 2>&1 | tail -3; echo \"clippy: ${PIPESTATUS[0]}\"; rtk cargo fmt -- --check && echo \"fmt: clean\"; rtk cargo test 2>&1 | tail -4",
+    "lintCommand": "cargo clippy",
+    "devCommand": "cargo run",
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "docs",
+      "src",
+      "tests"
+    ],
+    "gitBranches": {
+      "defaultBranch": "main",
+      "branchingStrategy": null
+    }
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "Formula": {
+      "path": "Formula",
+      "purpose": null,
+      "fileCount": 1,
+      "lastAccessed": 1783696917785,
+      "keyFiles": [
+        "auto-push.rb"
+      ]
+    },
+    "docs": {
+      "path": "docs",
+      "purpose": "Documentation",
+      "fileCount": 0,
+      "lastAccessed": 1783696917785,
+      "keyFiles": []
+    },
+    "src": {
+      "path": "src",
+      "purpose": "Source code",
+      "fileCount": 11,
+      "lastAccessed": 1783696917785,
+      "keyFiles": [
+        "config.rs",
+        "context.rs",
+        "generate.rs",
+        "git.rs",
+        "main.rs"
+      ]
+    },
+    "target": {
+      "path": "target",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1783696917785,
+      "keyFiles": [
+        "CACHEDIR.TAG"
+      ]
+    },
+    "tests": {
+      "path": "tests",
+      "purpose": "Test files",
+      "fileCount": 1,
+      "lastAccessed": 1783696917785,
+      "keyFiles": [
+        "integration.rs"
+      ]
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "src/template.rs",
+      "accessCount": 19,
+      "lastAccessed": 1783700474112,
+      "type": "file"
+    },
+    {
+      "path": "CLAUDE.md",
+      "accessCount": 8,
+      "lastAccessed": 1783697731196,
+      "type": "file"
+    },
+    {
+      "path": "src/pipeline.rs",
+      "accessCount": 7,
+      "lastAccessed": 1783700481666,
+      "type": "file"
+    },
+    {
+      "path": "tests/integration.rs",
+      "accessCount": 5,
+      "lastAccessed": 1783700499420,
+      "type": "file"
+    },
+    {
+      "path": "src/config.rs",
+      "accessCount": 3,
+      "lastAccessed": 1783698628552,
+      "type": "file"
+    },
+    {
+      "path": "src/main.rs",
+      "accessCount": 3,
+      "lastAccessed": 1783699074525,
+      "type": "file"
+    },
+    {
+      "path": "src/sanitize.rs",
+      "accessCount": 3,
+      "lastAccessed": 1783699324148,
+      "type": "file"
+    },
+    {
+      "path": "Cargo.toml",
+      "accessCount": 3,
+      "lastAccessed": 1783700616836,
+      "type": "file"
+    },
+    {
+      "path": "TODOS.md",
+      "accessCount": 2,
+      "lastAccessed": 1783697494652,
+      "type": "file"
+    },
+    {
+      "path": "src/generate.rs",
+      "accessCount": 2,
+      "lastAccessed": 1783698469687,
+      "type": "file"
+    },
+    {
+      "path": "src/vars.rs",
+      "accessCount": 2,
+      "lastAccessed": 1783698641650,
+      "type": "file"
+    },
+    {
+      "path": "README.md",
+      "accessCount": 1,
+      "lastAccessed": 1783697030661,
+      "type": "file"
+    },
+    {
+      "path": "Formula/auto-push.rb",
+      "accessCount": 1,
+      "lastAccessed": 1783697060362,
+      "type": "file"
+    },
+    {
+      "path": "install.sh",
+      "accessCount": 1,
+      "lastAccessed": 1783697060584,
+      "type": "file"
+    },
+    {
+      "path": "src/scan.rs",
+      "accessCount": 1,
+      "lastAccessed": 1783697109546,
+      "type": "file"
+    },
+    {
+      "path": "src/smart_init.rs",
+      "accessCount": 1,
+      "lastAccessed": 1783697109821,
+      "type": "file"
+    },
+    {
+      "path": "src/git.rs",
+      "accessCount": 1,
+      "lastAccessed": 1783697111638,
+      "type": "file"
+    },
+    {
+      "path": "src/context.rs",
+      "accessCount": 1,
+      "lastAccessed": 1783697112006,
+      "type": "file"
+    },
+    {
+      "path": "src/preflight.rs",
+      "accessCount": 1,
+      "lastAccessed": 1783697112809,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}

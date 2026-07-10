@@ -1,0 +1,77 @@
+{
+  "updatedAt": "2026-07-10T15:36:16.492Z",
+  "missions": [
+    {
+      "id": "session:dde1eed9-8ade-4db4-b6e1-c079d604ac14:none",
+      "source": "session",
+      "name": "none",
+      "objective": "Session mission",
+      "createdAt": "2026-07-10T15:23:36.057Z",
+      "updatedAt": "2026-07-10T15:36:16.492Z",
+      "status": "done",
+      "workerCount": 1,
+      "taskCounts": {
+        "total": 1,
+        "pending": 0,
+        "blocked": 0,
+        "inProgress": 0,
+        "completed": 1,
+        "failed": 0
+      },
+      "agents": [
+        {
+          "name": "claudemd-audit:aclaude",
+          "role": "claudemd-audit",
+          "ownership": "aclaudemd-audit-d49ebf7a993ed48a",
+          "status": "done",
+          "currentStep": null,
+          "latestUpdate": "completed",
+          "completedSummary": null,
+          "updatedAt": "2026-07-10T15:36:16.492Z"
+        }
+      ],
+      "timeline": [
+        {
+          "id": "session-start:aclaudemd-audit-d49ebf7a993ed48a:2026-07-10T15:23:36.057Z",
+          "at": "2026-07-10T15:23:36.057Z",
+          "kind": "update",
+          "agent": "claudemd-audit:aclaude",
+          "detail": "started claudemd-audit:aclaude",
+          "sourceKey": "session-start:aclaudemd-audit-d49ebf7a993ed48a"
+        },
+        {
+          "id": "session-stop:a0fa6ca7633b62f8d:2026-07-10T15:24:00.686Z",
+          "at": "2026-07-10T15:24:00.686Z",
+          "kind": "completion",
+          "agent": "claudemd-audit:aclaude",
+          "detail": "completed",
+          "sourceKey": "session-stop:a0fa6ca7633b62f8d"
+        },
+        {
+          "id": "session-stop:abe4a2c0f1889bc56:2026-07-10T15:27:02.873Z",
+          "at": "2026-07-10T15:27:02.873Z",
+          "kind": "completion",
+          "agent": "claudemd-audit:aclaude",
+          "detail": "completed",
+          "sourceKey": "session-stop:abe4a2c0f1889bc56"
+        },
+        {
+          "id": "session-stop:aclaudemd-audit-d49ebf7a993ed48a:2026-07-10T15:30:40.582Z",
+          "at": "2026-07-10T15:30:40.582Z",
+          "kind": "completion",
+          "agent": "claudemd-audit:aclaude",
+          "detail": "completed",
+          "sourceKey": "session-stop:aclaudemd-audit-d49ebf7a993ed48a"
+        },
+        {
+          "id": "session-stop:ae33e7653aefaf2f3:2026-07-10T15:36:16.492Z",
+          "at": "2026-07-10T15:36:16.492Z",
+          "kind": "completion",
+          "agent": "claudemd-audit:aclaude",
+          "detail": "completed",
+          "sourceKey": "session-stop:ae33e7653aefaf2f3"
+        }
+      ]
+    }
+  ]
+}

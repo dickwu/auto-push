@@ -1,0 +1,26 @@
+{
+  "agents": [
+    {
+      "agent_id": "a2be07d06ecdab6b7",
+      "agent_type": "oh-my-claudecode:code-reviewer",
+      "started_at": "2026-07-10T16:01:51.899Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-10T16:14:35.206Z",
+      "duration_ms": 763307
+    },
+    {
+      "agent_id": "a43020ddb293740a6",
+      "agent_type": "unknown",
+      "started_at": "2026-07-10T18:09:45.120Z",
+      "parent_mode": "none",
+      "status": "completed",
+      "completed_at": "2026-07-10T18:09:45.120Z",
+      "duration_ms": 0
+    }
+  ],
+  "total_spawned": 1,
+  "total_completed": 2,
+  "total_failed": 0,
+  "last_updated": "2026-07-10T18:09:45.380Z"
+}

@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"echo \\\"=== counts ===\\\" && git ls-files | wc -l && echo \\\"-- claude-flow tracked count --\\\" && git ls-files .claude-flow | wc -l && echo \\\"-- .claude tracked count --\\\" && git ls-files .cl...",
+  "error": "Exit code 1\n=== counts ===\n     308\n-- claude-flow tracked count --\n      15\n-- .claude tracked count --\n     263\n=== first commit adding .claude-flow ===\ndd09918 refactor: remove old pre_push module and .pre-push.json config\n=== .mcp.json content (from HEAD) ===\n{\n  \"mcpServers\": {\n    \"claude-flow\": {\n      \"command\": \"npx\",\n      \"args\": [\n        \"-y\",\n        \"@claude-flow/cli@latest\",\n        \"mcp\",\n        \"start\"\n      ],\n      \"env\": {\n        \"npm_config_update_notifier\": \"false\",\n    ...",
+  "timestamp": "2026-07-10T15:25:08.068Z",
+  "retry_count": 1
+}
