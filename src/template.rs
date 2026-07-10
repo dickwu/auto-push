@@ -1,37 +1,170 @@
+use crate::sanitize;
 use anyhow::{Result, anyhow};
 use regex::Regex;
 use std::collections::HashMap;
 
-/// Sanitize a value before interpolating it into a shell command template.
-/// Trims whitespace, escapes shell metacharacters, normalises newlines,
-/// and truncates to 200_000 chars (large enough for most diffs).
-pub fn sanitize_shell_value(raw: &str) -> String {
-    let trimmed = raw.trim();
-    let no_cr = trimmed.replace("\r\n", "\n").replace('\r', "");
+/// Cap on interpolated value size, applied before escaping so truncation can
+/// never split an escape sequence.
+///
+/// Sized for Linux: `execve` caps a single argument at `MAX_ARG_STRLEN`
+/// (128 KiB), the whole `sh -c <script>` script is one argument, and
+/// single-quote escaping can quadruple a run of `'`. Keeping raw values under
+/// ~24k chars keeps the escaped command well under that limit (4×24k = 96 KiB)
+/// while still covering realistic commit messages and the default diff cap.
+const MAX_INTERPOLATED_CHARS: usize = 24_000;
 
-    let shell_chars = [
-        '\'', '"', '`', '$', '!', '(', ')', '|', '&', ';', '<', '>', '\\',
-    ];
-    let mut escaped = String::with_capacity(no_cr.len());
-    for ch in no_cr.chars() {
-        if shell_chars.contains(&ch) {
-            escaped.push('\\');
+/// POSIX shell quoting context at a given position in a command template.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuoteContext {
+    Unquoted,
+    Single,
+    Double,
+    /// Inside a `#` comment (until the next newline). Content is discarded by
+    /// the shell, so an interpolated value here only needs its newlines
+    /// neutralised so it can't end the comment and expose live code.
+    Comment,
+}
+
+/// Best-effort POSIX shell lexer state carried across literal template
+/// segments. Tracks the quote/comment context plus whether the next character
+/// begins a new word (needed to recognise a `#` comment, which only starts at
+/// a word boundary). It does not model nested contexts inside `$(...)` or
+/// backticks — straightforward one-liner templates (everything auto-push
+/// generates) are tracked exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ShellState {
+    ctx: QuoteContext,
+    /// In unquoted context, true when the previous character was a blank or
+    /// token delimiter (or start of input) — i.e. a `#` here opens a comment.
+    at_word_start: bool,
+}
+
+impl ShellState {
+    fn start() -> Self {
+        Self {
+            ctx: QuoteContext::Unquoted,
+            at_word_start: true,
         }
-        escaped.push(ch);
     }
+}
 
-    let normalised = escaped.replace('\n', "\\n");
+/// Advance the shell lexer state across a literal template segment.
+fn advance_shell_state(segment: &str, mut st: ShellState) -> ShellState {
+    let bytes = segment.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match st.ctx {
+            QuoteContext::Unquoted => match bytes[i] {
+                b'#' if st.at_word_start => st.ctx = QuoteContext::Comment,
+                b'\'' => {
+                    st.ctx = QuoteContext::Single;
+                    st.at_word_start = false;
+                }
+                b'"' => {
+                    st.ctx = QuoteContext::Double;
+                    st.at_word_start = false;
+                }
+                b'\\' => {
+                    i += 1;
+                    st.at_word_start = false;
+                }
+                // Blanks and the unquoted token delimiters start a new word.
+                b' ' | b'\t' | b'\n' | b';' | b'&' | b'|' | b'(' | b')' | b'<' | b'>' => {
+                    st.at_word_start = true;
+                }
+                _ => st.at_word_start = false,
+            },
+            QuoteContext::Single => {
+                if bytes[i] == b'\'' {
+                    st.ctx = QuoteContext::Unquoted;
+                    st.at_word_start = false;
+                }
+            }
+            QuoteContext::Double => match bytes[i] {
+                b'"' => {
+                    st.ctx = QuoteContext::Unquoted;
+                    st.at_word_start = false;
+                }
+                b'\\' => i += 1,
+                _ => {}
+            },
+            QuoteContext::Comment => {
+                if bytes[i] == b'\n' {
+                    st.ctx = QuoteContext::Unquoted;
+                    st.at_word_start = true;
+                }
+            }
+        }
+        i += 1;
+    }
+    st
+}
 
-    if normalised.chars().count() > 200_000 {
-        let truncated: String = normalised.chars().take(200_000).collect();
+/// Normalize a value before shell interpolation: strip ANSI sequences and
+/// control chars (except newline/tab), trim, and truncate.
+fn normalize_value(raw: &str) -> String {
+    let cleaned = sanitize::clean_text(raw);
+    let trimmed = cleaned.trim();
+    if trimmed.chars().count() > MAX_INTERPOLATED_CHARS {
+        let truncated: String = trimmed.chars().take(MAX_INTERPOLATED_CHARS).collect();
         format!("{truncated}...(truncated)")
     } else {
-        normalised
+        trimmed.to_string()
+    }
+}
+
+/// True if the value can be substituted bare in unquoted context: one word,
+/// no metacharacters, glob chars, or whitespace. A leading `-` is rejected so
+/// a value can never be reinterpreted as a command-line option.
+fn is_shell_safe_bare(value: &str) -> bool {
+    !value.is_empty()
+        && !value.starts_with('-')
+        && value.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                || matches!(c, '_' | '-' | '.' | ',' | ':' | '/' | '@' | '%' | '+')
+        })
+}
+
+/// Escape `value` so the shell reads it back verbatim in the given context.
+///
+/// - Single-quoted context: close the quote around embedded `'` (`'\''`);
+///   everything else, including newlines, is literal inside single quotes.
+/// - Double-quoted context: backslash-escape the four characters the shell
+///   interprets there (`\`, `"`, `$`, backtick). `!` is left alone: history
+///   expansion is off in non-interactive `sh -c`.
+/// - Unquoted context: substitute bare only when the value is a single safe
+///   word; otherwise wrap it in single quotes (adjacent quoted text
+///   concatenates, so this stays correct mid-word).
+fn escape_for_context(value: &str, ctx: QuoteContext) -> String {
+    match ctx {
+        QuoteContext::Single => value.replace('\'', "'\\''"),
+        QuoteContext::Double => {
+            let mut out = String::with_capacity(value.len());
+            for ch in value.chars() {
+                if matches!(ch, '\\' | '"' | '$' | '`') {
+                    out.push('\\');
+                }
+                out.push(ch);
+            }
+            out
+        }
+        QuoteContext::Unquoted => {
+            if is_shell_safe_bare(value) {
+                value.to_string()
+            } else {
+                format!("'{}'", value.replace('\'', "'\\''"))
+            }
+        }
+        // Comment content is discarded; only a newline could end the comment
+        // early and expose the rest as live code, so collapse newlines.
+        QuoteContext::Comment => value.replace('\n', " "),
     }
 }
 
 /// Render a template string for use in shell commands.
-/// Values are shell-escaped to prevent injection.
+/// Values are escaped for the quote context they land in (single-quoted,
+/// double-quoted, or bare), so quotes, `$`, backticks, semicolons, and
+/// newlines in a value can neither break the command nor inject one.
 /// Unresolved `{{ var }}` patterns are left as-is.
 pub fn render_shell(template: &str, vars: &HashMap<String, String>) -> String {
     let spans = scan_template_expressions(template);
@@ -40,11 +173,23 @@ pub fn render_shell(template: &str, vars: &HashMap<String, String>) -> String {
     }
     let mut result = String::with_capacity(template.len());
     let mut last = 0;
+    let mut state = ShellState::start();
     for (start, end, expr) in spans {
-        result.push_str(&template[last..start]);
+        let literal = &template[last..start];
+        state = advance_shell_state(literal, state);
+        result.push_str(literal);
         match resolve_expression(expr, vars) {
-            Ok(val) => result.push_str(&sanitize_shell_value(&val)),
-            Err(_) => result.push_str(&template[start..end]),
+            Ok(val) => {
+                // A correctly escaped value never changes the quote/comment
+                // context, so `state` stays valid; it only ends a word.
+                result.push_str(&escape_for_context(&normalize_value(&val), state.ctx));
+                state.at_word_start = false;
+            }
+            Err(_) => {
+                let raw_span = &template[start..end];
+                state = advance_shell_state(raw_span, state);
+                result.push_str(raw_span);
+            }
         }
         last = end;
     }
@@ -53,8 +198,10 @@ pub fn render_shell(template: &str, vars: &HashMap<String, String>) -> String {
 }
 
 /// Render a template string for use as process arguments.
-/// Values are substituted raw (no shell escaping) since they will be
-/// passed directly via `Command::new().args()`, not through a shell.
+/// No shell escaping is needed since values are passed directly via
+/// `Command::new().args()`, not through a shell, but ANSI sequences and stray
+/// control characters are still stripped so tool output doesn't leak into
+/// argv (e.g. a colored AI response used as a commit message).
 /// Unresolved `{{ var }}` patterns are left as-is.
 pub fn render_raw(template: &str, vars: &HashMap<String, String>) -> String {
     let spans = scan_template_expressions(template);
@@ -66,7 +213,7 @@ pub fn render_raw(template: &str, vars: &HashMap<String, String>) -> String {
     for (start, end, expr) in spans {
         result.push_str(&template[last..start]);
         match resolve_expression(expr, vars) {
-            Ok(val) => result.push_str(val.trim()),
+            Ok(val) => result.push_str(sanitize::clean_text(&val).trim()),
             Err(_) => result.push_str(&template[start..end]),
         }
         last = end;
@@ -259,10 +406,63 @@ mod tests {
 
     #[test]
     fn test_render_shell_escapes() {
+        // Unquoted context: unsafe values get wrapped in single quotes with
+        // embedded quotes closed around ('\'').
         let v = vars(&[("val", "it's a $test")]);
         let result = render_shell("echo {{ val }}", &v);
-        assert!(result.contains("\\'"));
-        assert!(result.contains("\\$"));
+        assert_eq!(result, "echo 'it'\\''s a $test'");
+    }
+
+    #[test]
+    fn test_render_shell_single_quoted_context() {
+        let v = vars(&[("msg", "don't")]);
+        let result = render_shell("git commit -m '{{ msg }}'", &v);
+        assert_eq!(result, "git commit -m 'don'\\''t'");
+    }
+
+    #[test]
+    fn test_render_shell_double_quoted_context() {
+        let v = vars(&[("msg", "a \"b\" $c `d` \\e")]);
+        let result = render_shell("git commit -m \"{{ msg }}\"", &v);
+        assert_eq!(result, "git commit -m \"a \\\"b\\\" \\$c \\`d\\` \\\\e\"");
+    }
+
+    #[test]
+    fn test_render_shell_bare_safe_value_not_quoted() {
+        let v = vars(&[("branch", "feature/foo-1.2")]);
+        assert_eq!(
+            render_shell("git push origin {{ branch }}", &v),
+            "git push origin feature/foo-1.2"
+        );
+    }
+
+    #[test]
+    fn test_render_shell_strips_ansi_and_controls() {
+        let v = vars(&[("msg", "\u{1b}[32mfix: colored\u{1b}[0m\u{0}")]);
+        let result = render_shell("git commit -m '{{ msg }}'", &v);
+        assert_eq!(result, "git commit -m 'fix: colored'");
+    }
+
+    #[test]
+    fn test_advance_shell_state_tracking() {
+        use super::QuoteContext::*;
+        let s = ShellState::start();
+        let ctx = |seg| advance_shell_state(seg, s).ctx;
+        assert_eq!(ctx("echo "), Unquoted);
+        assert_eq!(ctx("echo '"), Single);
+        assert_eq!(ctx("echo 'a' "), Unquoted);
+        assert_eq!(ctx("echo \""), Double);
+        assert_eq!(ctx("echo \"a\\\""), Double);
+        assert_eq!(ctx("echo \\'"), Unquoted);
+        assert_eq!(ctx("a'b\"c"), Single);
+        assert_eq!(ctx("'\"'"), Unquoted);
+        // `#` opens a comment only at a word boundary.
+        assert_eq!(ctx("true # "), Comment);
+        assert_eq!(ctx("# "), Comment);
+        assert_eq!(ctx("echo foo#bar"), Unquoted);
+        assert_eq!(ctx("echo 'a'#b"), Unquoted);
+        // A newline ends the comment.
+        assert_eq!(ctx("true # x\nfoo"), Unquoted);
     }
 
     #[test]
@@ -281,11 +481,26 @@ mod tests {
     }
 
     #[test]
-    fn test_sanitize_shell_value_truncates() {
-        let long = "x".repeat(200_100);
-        let result = sanitize_shell_value(&long);
-        assert!(result.ends_with("...(truncated)"));
-        assert!(result.chars().count() < 200_100);
+    fn test_normalize_value_truncates_before_escaping() {
+        // Truncation happens before escaping, so a wall of quotes can never
+        // be cut mid-escape and unbalance the command. Assert on the rendered
+        // string directly rather than round-tripping a maximal value, which
+        // would push a huge single argument past the shell's per-arg limit.
+        let long = "'".repeat(MAX_INTERPOLATED_CHARS + 100);
+        let normalized = normalize_value(&long);
+        assert!(normalized.ends_with("...(truncated)"));
+        assert_eq!(
+            normalized.chars().count(),
+            MAX_INTERPOLATED_CHARS + "...(truncated)".len()
+        );
+
+        // Each kept `'` becomes `'\''`; the command stays balanced — opening
+        // template quote + escaped quotes, ending in the marker then the
+        // template's closing quote.
+        let v = vars(&[("msg", long.as_str())]);
+        let rendered = render_shell("printf %s '{{ msg }}'", &v);
+        assert!(rendered.starts_with("printf %s ''\\''"));
+        assert!(rendered.ends_with("...(truncated)'"));
     }
 
     #[test]
@@ -418,5 +633,157 @@ mod tests {
     fn test_resolve_regex_no_match_empty() {
         let v = vars(&[("text", "no numbers here")]);
         assert_eq!(resolve_expression("text:/\\d+/", &v).unwrap(), "");
+    }
+
+    // -----------------------------------------------------------------------
+    // Shell roundtrip tests: render a template with a hostile value, execute
+    // it through a real `sh -c`, and assert the value survives byte-for-byte.
+    // These pin the safety contract of render_shell for every quote context
+    // that appears in generated pipelines (single, double, unquoted).
+    // -----------------------------------------------------------------------
+
+    /// Run `sh -c <rendered>` and return stdout. Panics if sh reports a
+    /// syntax error or non-zero exit — a broken quoting scheme fails here.
+    fn sh_roundtrip(rendered: &str) -> String {
+        let out = std::process::Command::new("sh")
+            .args(["-c", rendered])
+            .output()
+            .expect("failed to spawn sh");
+        assert!(
+            out.status.success(),
+            "sh failed for command {rendered:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).to_string()
+    }
+
+    /// Hostile values every quote context must survive unchanged.
+    fn hostile_values() -> Vec<&'static str> {
+        vec![
+            "fix: don't panic",
+            "it's a \"mixed\" quote",
+            "cost is $100 and `date`",
+            "a $(reboot) substitution",
+            "semi; colons && ampersands || pipes | here",
+            "redirect < in > out",
+            "bang! star* quest? brack[et]",
+            "back\\slash and tab\there",
+            "'; echo INJECTED; '",
+            "\"; echo INJECTED; \"",
+            "`echo INJECTED`",
+            "unicode: héllo wörld 提交信息 🚀",
+            "-starts-with-dash",
+            "trailing backslash\\",
+            "#hash and %percent +plus",
+        ]
+    }
+
+    #[test]
+    fn test_shell_roundtrip_single_quoted_context() {
+        // Default auto-init commit step: git commit -m '{{ commit_message }}'
+        for msg in hostile_values() {
+            let v = vars(&[("msg", msg)]);
+            let rendered = render_shell("printf %s '{{ msg }}'", &v);
+            assert_eq!(sh_roundtrip(&rendered), msg, "value corrupted: {msg:?}");
+        }
+    }
+
+    #[test]
+    fn test_shell_roundtrip_double_quoted_context() {
+        // Smart-init commit step: git commit -m "{{ commit_message }}"
+        for msg in hostile_values() {
+            let v = vars(&[("msg", msg)]);
+            let rendered = render_shell("printf %s \"{{ msg }}\"", &v);
+            assert_eq!(sh_roundtrip(&rendered), msg, "value corrupted: {msg:?}");
+        }
+    }
+
+    #[test]
+    fn test_shell_roundtrip_unquoted_context() {
+        // Bare interpolation must yield exactly one word with the value intact.
+        for msg in hostile_values() {
+            let v = vars(&[("msg", msg)]);
+            let rendered = render_shell("printf %s {{ msg }}", &v);
+            assert_eq!(sh_roundtrip(&rendered), msg, "value corrupted: {msg:?}");
+        }
+    }
+
+    #[test]
+    fn test_shell_roundtrip_multiline_preserved() {
+        let msg = "feat: add feature\n\n- bullet one\n- bullet 'two'\n- costs $5";
+        for template in [
+            "printf %s '{{ msg }}'",
+            "printf %s \"{{ msg }}\"",
+            "printf %s {{ msg }}",
+        ] {
+            let v = vars(&[("msg", msg)]);
+            let rendered = render_shell(template, &v);
+            assert_eq!(
+                sh_roundtrip(&rendered),
+                msg,
+                "newlines corrupted via {template:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_shell_roundtrip_injection_never_executes() {
+        // If quoting is broken the injected command runs and the marker file
+        // appears; the printf output also diverges from the literal value.
+        let dir = std::env::temp_dir().join(format!("ap-inject-{}", std::process::id()));
+        let marker = dir.join("pwned");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let payload = format!("'; touch {}; '", marker.display());
+        let v = vars(&[("msg", payload.as_str())]);
+        let rendered = render_shell("printf %s '{{ msg }}'", &v);
+        let echoed = sh_roundtrip(&rendered);
+
+        assert!(!marker.exists(), "injection executed: {rendered}");
+        assert_eq!(echoed, payload);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_shell_roundtrip_value_after_closed_quote() {
+        // Context tracker must notice the template's own quotes closing.
+        let v = vars(&[("a", "it's one"), ("b", "two $x")]);
+        let rendered = render_shell("printf '%s|%s' '{{ a }}' \"{{ b }}\"", &v);
+        assert_eq!(sh_roundtrip(&rendered), "it's one|two $x");
+    }
+
+    #[test]
+    fn test_render_shell_empty_value_unquoted_stays_one_arg() {
+        // An empty value in unquoted context must not vanish into zero args.
+        let v = vars(&[("msg", "")]);
+        let rendered = render_shell("printf 'x%sy' {{ msg }}", &v);
+        assert_eq!(sh_roundtrip(&rendered), "xy");
+    }
+
+    #[test]
+    fn test_shell_roundtrip_comment_context_no_injection() {
+        // A value interpolated after an unquoted `#` lands in a shell comment.
+        // A multi-line value must not end the comment and run injected code.
+        let dir = std::env::temp_dir().join(format!("ap-comment-{}", std::process::id()));
+        let marker = dir.join("pwned");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let payload = format!("subject line\ntouch {}\ntrailer", marker.display());
+        let v = vars(&[("msg", payload.as_str())]);
+        let rendered = render_shell("true # {{ msg }}", &v);
+        // `true` plus a one-line comment: succeeds, produces nothing, and the
+        // newline-borne `touch` never executes.
+        assert_eq!(sh_roundtrip(&rendered), "");
+        assert!(!marker.exists(), "comment injection executed: {rendered}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_render_shell_comment_context_collapses_newlines() {
+        let v = vars(&[("msg", "one\ntwo\nthree")]);
+        let rendered = render_shell("true # {{ msg }}", &v);
+        assert_eq!(rendered, "true # one two three");
     }
 }

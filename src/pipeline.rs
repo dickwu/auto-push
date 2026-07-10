@@ -1,4 +1,5 @@
 use crate::config::{self, CaptureMode, PipelineCommand};
+use crate::sanitize;
 use crate::template;
 use crate::vars;
 use anyhow::{Context, Result, bail};
@@ -330,17 +331,33 @@ pub fn run_pipeline(
         }
 
         if success {
-            // 7. Capture: store trimmed stdout into template_vars
+            // 7. Capture: store cleaned + trimmed stdout into template_vars.
+            // ANSI sequences and control chars from AI CLIs would otherwise
+            // end up inside commit messages and downstream commands.
             if let Some(ref capture_name) = cmd.capture {
-                template_vars.insert(capture_name.clone(), output.trim().to_string());
+                let value = sanitize::clean_text(&output).trim().to_string();
+                if value.is_empty() {
+                    println!(
+                        "[pipeline] Warning: '{}' captured empty output into '{capture_name}'",
+                        cmd.name
+                    );
+                }
+                template_vars.insert(capture_name.clone(), value);
             }
 
-            // 8. Capture_after: execute each entry, store trimmed stdout
+            // 8. Capture_after: execute each entry, store cleaned + trimmed stdout
             if let Some(ref entries) = cmd.capture_after {
                 for entry in entries {
                     let resolved_cap_cmd = template::render_shell(&entry.run, template_vars);
                     let (cap_output, _) = execute_command_split(&resolved_cap_cmd, false)?;
-                    template_vars.insert(entry.name.clone(), cap_output.trim().to_string());
+                    let value = sanitize::clean_text(&cap_output).trim().to_string();
+                    if value.is_empty() {
+                        println!(
+                            "[pipeline] Warning: '{}' captured empty output into '{}'",
+                            cmd.name, entry.name
+                        );
+                    }
+                    template_vars.insert(entry.name.clone(), value);
                 }
             }
 

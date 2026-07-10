@@ -4,6 +4,7 @@ mod generate;
 mod git;
 mod pipeline;
 mod preflight;
+mod sanitize;
 mod scan;
 mod smart_init;
 mod template;
