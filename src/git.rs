@@ -73,9 +73,55 @@ pub fn has_remote() -> Result<bool> {
     Ok(!remotes.is_empty())
 }
 
-pub fn has_upstream() -> Result<bool> {
-    let (_, _, success) = run_git_check(&["rev-parse", "--abbrev-ref", "@{u}"])?;
-    Ok(success)
+/// The remote-tracking branch a local branch pushes to and pulls from.
+///
+/// Its `branch` is the name ON THE REMOTE, which need not match the local
+/// name: a release worktree checked out as `rel-1` from `origin/main` tracks
+/// `main`. Every push auto-push makes must target this, never the local
+/// name, or a bare `git push` refuses (git's `push.default=simple`) and a
+/// `git push origin <local>` invents a stray remote branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Upstream {
+    pub remote: String,
+    pub branch: String,
+}
+
+impl Upstream {
+    /// What `git push <remote> …` needs to land HEAD on the tracked branch.
+    pub fn push_refspec(&self) -> String {
+        format!("HEAD:{}", self.branch)
+    }
+}
+
+/// Resolve the current branch's upstream, or `None` when it has none.
+pub fn upstream(branch: &str) -> Result<Option<Upstream>> {
+    let (stdout, _, success) = run_git_check(&[
+        "for-each-ref",
+        "--format=%(upstream:remotename) %(upstream:remoteref)",
+        &format!("refs/heads/{branch}"),
+    ])?;
+    if !success {
+        return Ok(None);
+    }
+    Ok(parse_upstream_ref(&stdout))
+}
+
+/// Parse one `for-each-ref` line of the form `<remote> refs/heads/<branch>`.
+/// An unset upstream prints a blank line (or one lone space); a branch name
+/// may itself contain `/`, which is why the remote and the ref are read as
+/// two space-separated fields rather than split on `/`.
+fn parse_upstream_ref(line: &str) -> Option<Upstream> {
+    let mut fields = line.trim().splitn(2, ' ');
+    let remote = fields.next()?.trim();
+    let remote_ref = fields.next()?.trim();
+    if remote.is_empty() || remote_ref.is_empty() {
+        return None;
+    }
+    let branch = remote_ref.strip_prefix("refs/heads/").unwrap_or(remote_ref);
+    Some(Upstream {
+        remote: remote.to_string(),
+        branch: branch.to_string(),
+    })
 }
 
 pub fn is_shallow() -> Result<bool> {
@@ -117,4 +163,30 @@ pub fn submodule_paths() -> Result<Vec<String>> {
         })
         .collect();
     Ok(paths)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_upstream_ref_strips_the_heads_prefix() {
+        let up = parse_upstream_ref("origin refs/heads/main\n").unwrap();
+        assert_eq!(up.remote, "origin");
+        assert_eq!(up.branch, "main");
+        assert_eq!(up.push_refspec(), "HEAD:main");
+    }
+
+    #[test]
+    fn test_parse_upstream_ref_keeps_slashes_in_branch_names() {
+        let up = parse_upstream_ref("origin refs/heads/release/2026-10").unwrap();
+        assert_eq!(up.branch, "release/2026-10");
+    }
+
+    #[test]
+    fn test_parse_upstream_ref_none_when_unset() {
+        assert_eq!(parse_upstream_ref(" "), None);
+        assert_eq!(parse_upstream_ref(""), None);
+        assert_eq!(parse_upstream_ref("origin "), None);
+    }
 }

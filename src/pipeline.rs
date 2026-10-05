@@ -5,10 +5,46 @@ use crate::vars;
 use anyhow::{Context, Result, bail};
 use std::collections::HashMap;
 use std::io::IsTerminal;
+use std::sync::OnceLock;
 
 // ---------------------------------------------------------------------------
 // Command execution
 // ---------------------------------------------------------------------------
+
+/// Environment every pipeline shell inherits on top of the process's own.
+static PIPELINE_ENV: OnceLock<Vec<(String, String)>> = OnceLock::new();
+
+/// Make a bare `git push` in any pipeline step push to the branch's tracked
+/// upstream, the way `git pull` already follows it. git's default
+/// `push.default=simple` refuses when the upstream's name differs from the
+/// local one (a release worktree `rel-1` tracking `origin/main`), which is
+/// exactly the branch auto-push was asked to push. Scoped to the commands
+/// auto-push runs through `GIT_CONFIG_*`, so nothing is written to any git
+/// config and nothing leaks into the user's shell. Called once by main;
+/// a second call is a no-op.
+pub fn push_to_upstream_in_pipeline_env() {
+    let _ = PIPELINE_ENV.set(vec![
+        ("GIT_CONFIG_COUNT".to_string(), "1".to_string()),
+        ("GIT_CONFIG_KEY_0".to_string(), "push.default".to_string()),
+        ("GIT_CONFIG_VALUE_0".to_string(), "upstream".to_string()),
+    ]);
+}
+
+/// A program every pipeline step runs through, with the pipeline env applied.
+fn program(name: &str) -> std::process::Command {
+    let mut command = std::process::Command::new(name);
+    if let Some(env) = PIPELINE_ENV.get() {
+        command.envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+    }
+    command
+}
+
+/// The `sh -c` invocation every shell pipeline command runs through.
+fn shell(cmd: &str) -> std::process::Command {
+    let mut command = program("sh");
+    command.args(["-c", cmd]);
+    command
+}
 
 fn prompt_confirm(question: &str) -> Result<bool> {
     use std::io::Write;
@@ -33,12 +69,11 @@ fn prompt_confirm(question: &str) -> Result<bool> {
 /// Returns `(combined_output, success)`.
 fn execute_command(cmd: &str, interactive: bool) -> Result<(String, bool)> {
     use std::io::{BufRead, BufReader};
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     use std::thread;
 
     if interactive && std::io::stdin().is_terminal() {
-        let status = Command::new("sh")
-            .args(["-c", cmd])
+        let status = shell(cmd)
             .status()
             .with_context(|| format!("failed to run: {cmd}"))?;
         return Ok((String::new(), status.success()));
@@ -50,8 +85,7 @@ fn execute_command(cmd: &str, interactive: bool) -> Result<(String, bool)> {
         );
     }
 
-    let mut child = Command::new("sh")
-        .args(["-c", cmd])
+    let mut child = shell(cmd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -109,12 +143,11 @@ fn execute_command(cmd: &str, interactive: bool) -> Result<(String, bool)> {
 /// stdout is captured and returned. stderr is streamed to terminal only.
 fn execute_command_split(cmd: &str, interactive: bool) -> Result<(String, bool)> {
     use std::io::{BufRead, BufReader};
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     use std::thread;
 
     if interactive && std::io::stdin().is_terminal() {
-        let status = Command::new("sh")
-            .args(["-c", cmd])
+        let status = shell(cmd)
             .status()
             .with_context(|| format!("failed to run: {cmd}"))?;
         return Ok((String::new(), status.success()));
@@ -126,8 +159,7 @@ fn execute_command_split(cmd: &str, interactive: bool) -> Result<(String, bool)>
         );
     }
 
-    let mut child = Command::new("sh")
-        .args(["-c", cmd])
+    let mut child = shell(cmd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -174,11 +206,11 @@ fn execute_command_split(cmd: &str, interactive: bool) -> Result<(String, bool)>
 /// stdout is captured and returned. stderr is streamed to terminal only.
 fn execute_argv(command: &str, args: &[String], interactive: bool) -> Result<(String, bool)> {
     use std::io::{BufRead, BufReader};
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     use std::thread;
 
     if interactive && std::io::stdin().is_terminal() {
-        let status = Command::new(command)
+        let status = program(command)
             .args(args)
             .status()
             .with_context(|| format!("failed to run: {command}"))?;
@@ -191,7 +223,7 @@ fn execute_argv(command: &str, args: &[String], interactive: bool) -> Result<(St
         );
     }
 
-    let mut child = Command::new(command)
+    let mut child = program(command)
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

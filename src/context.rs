@@ -1,3 +1,4 @@
+use crate::git::Upstream;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -5,6 +6,9 @@ pub struct PreflightResult {
     pub repo_root: PathBuf,
     pub branch: String,
     pub remote: String,
+    /// The tracked remote branch, when the branch has one. Pushes target
+    /// it, so a release worktree (`rel-1` -> `origin/main`) lands on main.
+    pub upstream: Option<Upstream>,
     #[allow(dead_code)]
     pub is_shallow: bool,
     #[allow(dead_code)]
@@ -89,6 +93,10 @@ mod tests {
             repo_root: PathBuf::from("/tmp/repo"),
             branch: "main".to_string(),
             remote: "origin".to_string(),
+            upstream: Some(Upstream {
+                remote: "origin".to_string(),
+                branch: "main".to_string(),
+            }),
             is_shallow: false,
             has_submodules: false,
             submodule_paths: vec![],

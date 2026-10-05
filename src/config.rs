@@ -453,9 +453,9 @@ pub fn auto_init_heuristic(repo_root: &Path) -> Result<()> {
     // Push
     pipeline.push(serde_json::json!({
         "name": "push",
-        "run": "git push origin {{ branch }}",
+        "run": "git push {{ upstream_remote }} {{ push_refspec }}",
         "description": "Push to remote",
-        "on_error": "sleep 2 && git push origin {{ branch }}"
+        "on_error": "sleep 2 && git pull {{ upstream_remote }} {{ upstream_branch }} && git push {{ upstream_remote }} {{ push_refspec }}"
     }));
 
     config.insert("pipeline".into(), serde_json::Value::Array(pipeline));
@@ -666,9 +666,12 @@ pub fn migrate_to_pipeline(config: &AppConfig) -> Result<Vec<PipelineCommand>> {
     // Push
     pipeline.push(PipelineCommand {
         name: "push".into(),
-        run: Some("git push origin {{ branch }}".into()),
+        run: Some("git push {{ upstream_remote }} {{ push_refspec }}".into()),
         description: Some("Push to remote".into()),
-        on_error: Some("sleep 2 && git push origin {{ branch }}".into()),
+        on_error: Some(
+            "sleep 2 && git pull {{ upstream_remote }} {{ upstream_branch }} && git push {{ upstream_remote }} {{ push_refspec }}"
+                .into(),
+        ),
         ..Default::default()
     });
 

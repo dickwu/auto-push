@@ -79,15 +79,57 @@ impl PipelineWorkspace {
                     {"name": "commit_hash", "run": "git rev-parse --short HEAD"},
                     {"name": "commit_summary", "run": "git log -1 --format=%s"}
                  ]},
-                {"name": "push",    "run": "git push origin {{ branch }}",
+                {"name": "push",    "run": "git push {{ upstream_remote }} {{ push_refspec }}",
+                 "on_error": "sleep 2 && git pull {{ upstream_remote }} {{ upstream_branch }} && git push {{ upstream_remote }} {{ push_refspec }}"}
+            ]
+        });
+        self.write_config(&config);
+    }
+
+    /// Write a pipeline that pushes the way a hand-edited repo config does:
+    /// a bare `git push`, retried as `git push origin {{ branch }}`.
+    fn write_bare_push_pipeline_config(&self) {
+        let config = serde_json::json!({
+            "pipeline": [
+                {"name": "stage",    "run": "git add -A"},
+                {"name": "generate", "run": "echo unused", "capture": "commit_message"},
+                {"name": "commit",   "run": "git commit -m '{{ commit_message }}'"},
+                {"name": "push",     "run": "git push",
                  "on_error": "sleep 2 && git push origin {{ branch }}"}
             ]
         });
+        self.write_config(&config);
+    }
+
+    fn write_config(&self, config: &serde_json::Value) {
         std::fs::write(
             self.repo().join(".auto-push.json"),
-            serde_json::to_string_pretty(&config).unwrap(),
+            serde_json::to_string_pretty(config).unwrap(),
         )
         .unwrap();
+    }
+
+    /// Check out a release-style branch that tracks `origin/main` under a
+    /// different name — the shape of a release worktree.
+    fn checkout_release_branch(&self, name: &str) {
+        git_in(&self.repo(), &["checkout", "-b", name, "origin/main"]);
+        git_in(
+            &self.repo(),
+            &["branch", "--set-upstream-to=origin/main", name],
+        );
+    }
+
+    fn remote_branches(&self) -> Vec<String> {
+        let out = Command::new("git")
+            .args(["for-each-ref", "--format=%(refname:short)", "refs/heads/"])
+            .env("GIT_DIR", self.root.path().join("remote.git"))
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect()
     }
 
     fn run_auto_push(&self, args: &[&str]) -> std::process::Output {
@@ -274,6 +316,79 @@ fn test_default_pipeline_auto_init_runs_end_to_end() {
         "auto-init did not write config"
     );
     assert_eq!(ws.remote_commit_count(), 2, "pipeline did not push");
+}
+
+#[test]
+fn test_release_branch_tracking_main_pushes_to_main() {
+    // A branch named differently from its upstream (rel-1 -> origin/main) is
+    // the shape of a release worktree. The default pipeline must land the
+    // commit on main and must not invent a remote `rel-1`.
+    let ws = PipelineWorkspace::new();
+    ws.checkout_release_branch("rel-1");
+    ws.write_default_pipeline_config("echo unused");
+    std::fs::write(ws.repo().join("bump.txt"), "0.0.2").unwrap();
+
+    let output = ws.run_auto_push(&["-m", "chore: bump version"]);
+
+    assert!(
+        output.status.success(),
+        "pipeline failed: {}",
+        combined_output(&output)
+    );
+    assert_eq!(ws.remote_commit_count(), 2, "commit did not reach main");
+    assert_eq!(
+        ws.remote_branches(),
+        vec!["main".to_string()],
+        "a stray remote branch was created"
+    );
+    let out = combined_output(&output);
+    assert!(
+        out.contains("[preflight] rel-1 -> origin/main"),
+        "preflight does not name the upstream: {out}"
+    );
+}
+
+#[test]
+fn test_bare_git_push_follows_the_upstream() {
+    // A repo config with a bare `git push` (and the old same-name retry)
+    // must behave the same: the push goes to the tracked branch, and the
+    // retry never runs, so no `rel-1` appears on the remote.
+    let ws = PipelineWorkspace::new();
+    ws.checkout_release_branch("rel-1");
+    ws.write_bare_push_pipeline_config();
+    std::fs::write(ws.repo().join("bump.txt"), "0.0.2").unwrap();
+
+    let output = ws.run_auto_push(&["-m", "chore: bump version"]);
+
+    assert!(
+        output.status.success(),
+        "pipeline failed: {}",
+        combined_output(&output)
+    );
+    assert_eq!(ws.remote_commit_count(), 2, "commit did not reach main");
+    assert_eq!(
+        ws.remote_branches(),
+        vec!["main".to_string()],
+        "a stray remote branch was created"
+    );
+}
+
+#[test]
+fn test_same_name_branch_still_pushes_to_itself() {
+    // The common case is untouched: main tracking origin/main.
+    let ws = PipelineWorkspace::new();
+    ws.write_default_pipeline_config("echo unused");
+    std::fs::write(ws.repo().join("change.txt"), "change").unwrap();
+
+    let output = ws.run_auto_push(&["-m", "feat: a change"]);
+
+    assert!(
+        output.status.success(),
+        "pipeline failed: {}",
+        combined_output(&output)
+    );
+    assert_eq!(ws.remote_commit_count(), 2);
+    assert_eq!(ws.remote_branches(), vec!["main".to_string()]);
 }
 
 #[test]

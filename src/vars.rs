@@ -14,6 +14,9 @@ pub fn builtin_var_names() -> HashSet<String> {
         "remote",
         "remote_url",
         "repo_root",
+        "upstream_remote",
+        "upstream_branch",
+        "push_refspec",
         // Dynamic (lazy, recomputed when git state changes)
         "diff",
         "diff_stat",
@@ -417,6 +420,7 @@ pub fn build_static_vars(
     remote: &str,
     remote_url: &str,
     repo_root: &str,
+    upstream: Option<&crate::git::Upstream>,
     generate_config: &crate::config::GenerateConfig,
 ) -> HashMap<String, String> {
     let mut vars = HashMap::new();
@@ -424,6 +428,16 @@ pub fn build_static_vars(
     vars.insert("remote".into(), remote.to_string());
     vars.insert("remote_url".into(), remote_url.to_string());
     vars.insert("repo_root".into(), repo_root.to_string());
+    // Where a push lands. With an upstream, the tracked branch by its REMOTE
+    // name (`rel-1` tracking `origin/main` pushes `HEAD:main`); without one,
+    // the local name on the default remote, as before.
+    let (upstream_remote, upstream_branch, push_refspec) = match upstream {
+        Some(up) => (up.remote.clone(), up.branch.clone(), up.push_refspec()),
+        None => (remote.to_string(), branch.to_string(), branch.to_string()),
+    };
+    vars.insert("upstream_remote".into(), upstream_remote);
+    vars.insert("upstream_branch".into(), upstream_branch);
+    vars.insert("push_refspec".into(), push_refspec);
     vars.insert(
         "max_diff_bytes".into(),
         generate_config.max_diff_bytes.to_string(),

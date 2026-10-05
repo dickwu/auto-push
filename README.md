@@ -145,12 +145,21 @@ The `pipeline` array defines every step of the workflow. Each entry is a command
     },
     {
       "name": "push",
-      "run": "git push origin {{ branch }}",
-      "on_error": "sleep 2 && git push origin {{ branch }}"
+      "run": "git push {{ upstream_remote }} {{ push_refspec }}",
+      "on_error": "sleep 2 && git pull {{ upstream_remote }} {{ upstream_branch }} && git push {{ upstream_remote }} {{ push_refspec }}"
     }
   ]
 }
 ```
+
+**Where a push goes.** A push lands on the branch's *upstream*, by its name on the remote —
+the same branch `git pull` follows. For `main` tracking `origin/main` that is `main`; for a
+release worktree checked out as `rel-1` from `origin/main` it is still `main`
+(`{{ push_refspec }}` is `HEAD:main`), not a new remote `rel-1`. The preflight line names it:
+`[preflight] rel-1 -> origin/main`. A branch with no upstream pushes its own name to the
+default remote. The same rule is applied to a bare `git push` inside any pipeline step: while
+the pipeline runs, git sees `push.default=upstream` through `GIT_CONFIG_*` environment
+variables, so nothing is written to your git config.
 
 ### Two execution modes
 
@@ -195,8 +204,11 @@ Variables are available in `run`, `args`, `on_error`, and `confirm` fields via `
 
 | Variable | Description |
 |---|---|
-| `{{ branch }}` | Current branch name |
+| `{{ branch }}` | Current branch name (local) |
 | `{{ remote }}` | Remote name (e.g. `origin`) |
+| `{{ upstream_remote }}` | Remote the branch tracks (`origin`); the default remote when it tracks nothing |
+| `{{ upstream_branch }}` | Name of the tracked branch **on the remote** (`main` for `rel-1` → `origin/main`); the local name when untracked |
+| `{{ push_refspec }}` | What to push to land HEAD on the tracked branch: `HEAD:main`; the local branch name when untracked |
 | `{{ remote_url }}` | Remote URL |
 | `{{ repo_root }}` | Repository root path |
 | `{{ diff }}` | Staged diff (dynamic, recomputed after git changes) |

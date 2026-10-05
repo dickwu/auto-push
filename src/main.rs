@@ -205,8 +205,15 @@ fn main() -> Result<()> {
         &preflight_result.remote,
         &git::remote_url(&preflight_result.remote),
         preflight_result.repo_root.to_str().unwrap_or("."),
+        preflight_result.upstream.as_ref(),
         &app_config.generate,
     );
+
+    // A pipeline's bare `git push` goes where the branch tracks, like the
+    // {{ push_refspec }} the default pipeline uses.
+    if preflight_result.upstream.is_some() {
+        pipeline::push_to_upstream_in_pipeline_env();
+    }
 
     // Add user vars from config
     for (k, v) in &app_config.vars {

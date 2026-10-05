@@ -19,7 +19,8 @@ pub fn check() -> Result<PreflightResult> {
 
     let branch = git::current_branch()?;
     let remote = git::default_remote()?;
-    let has_upstream = git::has_upstream()?;
+    let upstream = git::upstream(&branch)?;
+    let has_upstream = upstream.is_some();
     let is_shallow = git::is_shallow()?;
     let has_lfs = git::has_lfs()?;
 
@@ -91,12 +92,20 @@ pub fn check() -> Result<PreflightResult> {
         format!(" ({})", info_parts.join(", "))
     };
 
-    println!("[preflight] {branch} -> {remote}{info}");
+    // Name the branch the push will land on, not just the remote: a branch
+    // whose upstream has another name (a release worktree `rel-1` tracking
+    // `origin/main`) is exactly the case a reader needs to see.
+    let target = match &upstream {
+        Some(up) => format!("{}/{}", up.remote, up.branch),
+        None => remote.clone(),
+    };
+    println!("[preflight] {branch} -> {target}{info}");
 
     Ok(PreflightResult {
         repo_root,
         branch,
         remote,
+        upstream,
         is_shallow,
         has_submodules,
         submodule_paths,
