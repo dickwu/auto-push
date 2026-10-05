@@ -38,7 +38,13 @@ impl PipelineWorkspace {
         let home = root.path().join("home");
         std::fs::create_dir_all(&home).unwrap();
 
-        git_in(root.path(), &["init", "--bare", remote.to_str().unwrap()]);
+        // Pin the remote's HEAD to `main`: `last_remote_message` reads HEAD,
+        // and a runner whose init.defaultBranch is `master` would otherwise
+        // read an unborn branch while every push lands on `main`.
+        git_in(
+            root.path(),
+            &["init", "--bare", "-b", "main", remote.to_str().unwrap()],
+        );
         std::fs::create_dir_all(&repo).unwrap();
         git_in(&repo, &["init", "-b", "main"]);
         git_in(&repo, &["config", "user.email", "test@test.com"]);
